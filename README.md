@@ -131,10 +131,6 @@ aws/
 - The JWT secret is a Lambda environment variable. For production, move it to Secrets Manager or SSM Parameter Store.
 - The S3 website endpoint is HTTP only. Put CloudFront in front of it for HTTPS and a custom domain.
 
-## Credits
-
-Quibble began from [QuizArena](https://github.com/Yosephjgb/quizarena) by Yosephjgb (MIT License). It has since been rebuilt for serverless AWS and redesigned.
-
 ## License
 
 MIT

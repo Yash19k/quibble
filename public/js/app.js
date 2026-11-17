@@ -132,6 +132,21 @@ function renderAuth(mode = 'login') {
   const email = el('input', { type: 'email', autocomplete: 'email', required: true });
   const username = el('input', { autocomplete: 'username', minlength: 3, maxlength: 20, pattern: '[A-Za-z0-9_]{3,20}', title: '3-20 letters, numbers or underscores' });
   const password = el('input', { type: 'password', autocomplete: mode === 'login' ? 'current-password' : 'new-password', minlength: mode === 'login' ? 1 : 8, required: true });
+  const EYE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const EYE_OFF = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.7 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M2 2l20 20"/></svg>';
+  const toggle = el('button', {
+    type: 'button', class: 'pw-toggle', 'aria-label': 'Show password', 'aria-pressed': 'false',
+    onclick: () => {
+      const show = password.type === 'password';
+      password.type = show ? 'text' : 'password';
+      toggle.innerHTML = show ? EYE_OFF : EYE;
+      toggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      toggle.setAttribute('aria-pressed', String(show));
+      password.focus();
+    },
+  });
+  toggle.innerHTML = EYE;
+  const passwordField = el('div', { class: 'pw-field' }, password, toggle);
 
   const form = el(
     'form',
@@ -157,7 +172,7 @@ function renderAuth(mode = 'login') {
     el('h2', {}, mode === 'login' ? 'Welcome back' : 'Create your account'),
     el('label', {}, 'Email'), email,
     mode === 'register' ? [el('label', {}, 'Username'), username] : null,
-    el('label', {}, 'Password'), password,
+    el('label', {}, 'Password'), passwordField,
     error,
     el('button', { class: 'block', type: 'submit' }, mode === 'login' ? 'Log in' : 'Sign up'),
     el('p', { class: 'muted' },

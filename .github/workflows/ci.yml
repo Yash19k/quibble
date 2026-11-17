@@ -1,0 +1,35 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: Unit + end-to-end tests
+    runs-on: ubuntu-latest
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local
+        ports: ['8000:8000']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm test
+      - name: Start local stack (real Lambda handlers + DynamoDB Local)
+        run: |
+          REVEAL_MS=600 ADMIN_PASSWORD=admin12345 node aws/local/dev-server.mjs > server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:5050/api/health && exit 0; sleep 1; done
+          cat server.log; exit 1
+      - run: npm run test:e2e
+      - if: failure()
+        run: cat server.log
+
+  template:
+    name: Lint CloudFormation template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install cfn-lint
+      - run: cfn-lint aws/template.yaml

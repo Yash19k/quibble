@@ -1,0 +1,523 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Quibble - serverless multiplayer quiz. API Gateway (HTTP + WebSocket), Lambda, DynamoDB,
+  S3 static website, CloudWatch logs/metrics/alarms/dashboard, least-privilege IAM roles.
+
+Parameters:
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: Secret used to sign login tokens (64+ random characters).
+  WebSocketStageName:
+    Type: String
+    Default: prod
+  RevealMs:
+    Type: Number
+    Default: 4000
+    Description: Pause between a question's result and the next question (ms).
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+  ExtraCorsOrigin:
+    Type: String
+    Default: 'http://localhost:5050'
+    Description: Another origin allowed to call the HTTP API (e.g. the local dev server).
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    CodeUri: backend/
+    MemorySize: 256
+    Timeout: 10
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        QUESTIONS_TABLE: !Ref QuestionsTable
+        GAMES_TABLE: !Ref GamesTable
+        CONNECTIONS_TABLE: !Ref ConnectionsTable
+        RESULTS_TABLE: !Ref ResultsTable
+        RATE_LIMITS_TABLE: !Ref RateLimitsTable
+        JWT_SECRET: !Ref JwtSecret
+        REVEAL_MS: !Ref RevealMs
+        WS_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStageName}'
+        # A plain name (not !Ref) so the timer function can reference itself without a circular dependency.
+        TIMER_FUNCTION: !Sub '${AWS::StackName}-game-timer'
+
+Resources:
+  # =====================================================================
+  # DynamoDB (on-demand billing: you pay per request, nothing when idle)
+  # =====================================================================
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: pk, AttributeType: S }]
+      KeySchema: [{ AttributeName: pk, KeyType: HASH }]
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  QuestionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  GamesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: code, AttributeType: S }]
+      KeySchema: [{ AttributeName: code, KeyType: HASH }]
+      TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: connectionId, AttributeType: S }
+        - { AttributeName: userId, AttributeType: S }
+        - { AttributeName: gameCode, AttributeType: S }
+      KeySchema: [{ AttributeName: connectionId, KeyType: HASH }]
+      GlobalSecondaryIndexes:
+        - IndexName: byUser
+          KeySchema: [{ AttributeName: userId, KeyType: HASH }]
+          Projection: { ProjectionType: ALL }
+        - IndexName: byGame
+          KeySchema: [{ AttributeName: gameCode, KeyType: HASH }]
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
+
+  ResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: userId, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: userId, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  RateLimitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: key, AttributeType: S }]
+      KeySchema: [{ AttributeName: key, KeyType: HASH }]
+      TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
+
+  # =====================================================================
+  # S3 static website (the frontend in public/)
+  # =====================================================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: false # the bucket policy below makes objects publicly readable
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadForWebsite
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+
+  # =====================================================================
+  # API Gateway HTTP API (REST endpoints under /api/*)
+  # =====================================================================
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !GetAtt FrontendBucket.WebsiteURL
+          - !Ref ExtraCorsOrigin
+        AllowHeaders: [content-type, authorization]
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        MaxAge: 600
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latencyMs":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}'
+
+  HttpApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/quibble/${AWS::StackName}/http-api-access'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # =====================================================================
+  # API Gateway WebSocket API (real-time gameplay)
+  # =====================================================================
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-ws'
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: '$request.body.action'
+
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsConnectFunction.Arn}/invocations'
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE # the Lambda checks the JWT itself
+      Target: !Sub 'integrations/${ConnectIntegration}'
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsDisconnectFunction.Arn}/invocations'
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+
+  MessageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsMessageFunction.Arn}/invocations'
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $default
+      Target: !Sub 'integrations/${MessageIntegration}'
+
+  WebSocketDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [ConnectRoute, DisconnectRoute, DefaultRoute]
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref WebSocketStageName
+      DeploymentId: !Ref WebSocketDeployment
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 200
+        ThrottlingRateLimit: 100
+
+  WsConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsConnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+  WsDisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsDisconnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+  WsMessagePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsMessageFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # =====================================================================
+  # Lambda functions. Each gets its own IAM role with only the permissions it needs
+  # (SAM turns the Policies list into a role per function).
+  # =====================================================================
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: REST API (auth, leaderboard, history, admin)
+      Handler: src/handlers/http.handler
+      MemorySize: 512 # bcrypt is CPU-bound; more memory = more CPU
+      Timeout: 20 # trivia import calls an external API
+      LoggingConfig: { LogGroup: !Ref ApiLogGroup }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/{proxy+}
+            Method: ANY
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref QuestionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamesTable } # admin ban kicks players from live games
+        - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ResultsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref RateLimitsTable }
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${WebSocketStageName}/*/@connections/*'
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-game-timer'
+            - Effect: Allow # results are written when a kicked player's departure ends a question
+              Action: [dynamodb:PutItem, dynamodb:BatchWriteItem]
+              Resource: !GetAtt ResultsTable.Arn
+
+  WsConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: WebSocket $connect - authenticate and register the socket
+      Handler: src/handlers/wsConnect.handler
+      LoggingConfig: { LogGroup: !Ref WsLogGroup }
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref UsersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
+
+  WsDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: WebSocket $disconnect - mark the player offline
+      Handler: src/handlers/wsDisconnect.handler
+      LoggingConfig: { LogGroup: !Ref WsLogGroup }
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
+        - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable }
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${WebSocketStageName}/*/@connections/*'
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-game-timer'
+
+  WsMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: WebSocket $default - game actions (create, join, start, answer...)
+      Handler: src/handlers/wsMessage.handler
+      LoggingConfig: { LogGroup: !Ref WsLogGroup }
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
+        - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable }
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${WebSocketStageName}/*/@connections/*'
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-game-timer'
+
+  GameTimerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-game-timer'
+      Description: Waits for a question/reveal deadline, then advances the game
+      Handler: src/handlers/gameTimer.handler
+      Timeout: 90
+      MemorySize: 128
+      LoggingConfig: { LogGroup: !Ref TimerLogGroup }
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        MaximumEventAgeInSeconds: 300
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
+        - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable }
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${WebSocketStageName}/*/@connections/*'
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-game-timer'
+
+  # =====================================================================
+  # CloudWatch: log groups with retention, alarms, dashboard
+  # =====================================================================
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/quibble/${AWS::StackName}/api'
+      RetentionInDays: !Ref LogRetentionDays
+  WsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/quibble/${AWS::StackName}/websocket'
+      RetentionInDays: !Ref LogRetentionDays
+  TimerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/quibble/${AWS::StackName}/game-timer'
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-api-lambda-errors'
+      AlarmDescription: The REST API Lambda threw errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ApiFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  WsErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-websocket-lambda-errors'
+      AlarmDescription: The WebSocket message Lambda threw errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref WsMessageFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  TimerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-game-timer-errors'
+      AlarmDescription: The game timer failed to advance a game
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref GameTimerFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  HttpApi5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-http-api-5xx'
+      AlarmDescription: The HTTP API returned 5 or more server errors in 5 minutes
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - { Name: ApiId, Value: !Ref HttpApi }
+        - { Name: Stage, Value: $default }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            { "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6, "properties": {
+                "title": "Games", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "Quibble", "GamesCreated" ], [ ".", "GamesStarted" ], [ ".", "GamesFinished" ], [ ".", "GamesCancelled" ]
+                ] } },
+            { "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6, "properties": {
+                "title": "Gameplay", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "Quibble", "AnswersSubmitted" ], [ ".", "QuestionsAsked" ], [ ".", "UsersRegistered" ], [ ".", "GameWriteConflicts" ]
+                ] } },
+            { "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6, "properties": {
+                "title": "WebSocket API", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/ApiGateway", "ConnectCount", "ApiId", "${WebSocketApi}", "Stage", "${WebSocketStageName}" ],
+                  [ ".", "MessageCount", ".", ".", ".", "." ],
+                  [ ".", "ClientError", ".", ".", ".", "." ],
+                  [ ".", "ExecutionError", ".", ".", ".", "." ]
+                ] } },
+            { "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6, "properties": {
+                "title": "HTTP API", "region": "${AWS::Region}", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/ApiGateway", "Count", "ApiId", "${HttpApi}", "Stage", "$default", { "stat": "Sum" } ],
+                  [ ".", "4xx", ".", ".", ".", ".", { "stat": "Sum" } ],
+                  [ ".", "5xx", ".", ".", ".", ".", { "stat": "Sum" } ],
+                  [ ".", "Latency", ".", ".", ".", ".", { "stat": "p90", "yAxis": "right" } ]
+                ] } },
+            { "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6, "properties": {
+                "title": "Lambda errors", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${ApiFunction}" ],
+                  [ "...", "${WsMessageFunction}" ],
+                  [ "...", "${WsConnectFunction}" ],
+                  [ "...", "${WsDisconnectFunction}" ],
+                  [ "...", "${GameTimerFunction}" ]
+                ] } },
+            { "type": "metric", "x": 12, "y": 12, "width": 12, "height": 6, "properties": {
+                "title": "Lambda duration p90 (ms)", "region": "${AWS::Region}", "stat": "p90", "period": 300, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${ApiFunction}" ],
+                  [ "...", "${WsMessageFunction}" ]
+                ] } },
+            { "type": "log", "x": 0, "y": 18, "width": 24, "height": 6, "properties": {
+                "title": "Recent errors", "region": "${AWS::Region}", "view": "table",
+                "query": "SOURCE '${ApiLogGroup}' | SOURCE '${WsLogGroup}' | SOURCE '${TimerLogGroup}' | fields @timestamp, msg, error.message | filter level = 'error' | sort @timestamp desc | limit 20"
+              } }
+          ]
+        }
+
+Outputs:
+  WebsiteUrl:
+    Description: Open this in a browser
+    Value: !GetAtt FrontendBucket.WebsiteURL
+  HttpApiUrl:
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  WebSocketUrl:
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStageName}'
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  UsersTableName:
+    Value: !Ref UsersTable
+  QuestionsTableName:
+    Value: !Ref QuestionsTable
+  DashboardUrl:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}'

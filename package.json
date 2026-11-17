@@ -1,0 +1,28 @@
+{
+  "name": "quibble",
+  "version": "1.0.0",
+  "description": "Quibble: a real-time multiplayer quiz game running serverless on AWS (API Gateway WebSockets, Lambda, DynamoDB, S3, CloudWatch, IAM)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm --prefix aws/backend install --no-audit --no-fund",
+    "dev": "node aws/local/dev-server.mjs",
+    "test": "node --test aws/tests/scoring.test.mjs",
+    "test:e2e": "node --test aws/tests/game.e2e.test.mjs",
+    "deploy": "node aws/scripts/deploy.mjs",
+    "publish": "node aws/scripts/publish-frontend.mjs",
+    "seed": "node aws/scripts/seed.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1170.0",
+    "@aws-sdk/client-dynamodb": "^3.1170.0",
+    "@aws-sdk/client-s3": "^3.1170.0",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^18.0.9",
+    "ws": "^8.23.0"
+  }
+}

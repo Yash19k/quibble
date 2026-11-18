@@ -15,7 +15,7 @@ async function init() {
 }
 
 function deny(msg) {
-  clear(app).append(el('div', { class: 'card narrow' }, el('h2', {}, 'Admins only'), el('p', { class: 'muted' }, msg), el('a', { class: 'btn', href: '/' }, 'Go to login')));
+  clear(app).append(el('div', { class: 'card narrow' }, el('h2', {}, 'Admins only'), el('p', { class: 'muted' }, msg), el('a', { class: 'btn', href: '/play.html' }, 'Go to login')));
 }
 
 function render() {

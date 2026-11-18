@@ -3,17 +3,140 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Quibble</title>
+  <title>Quibble · Real-time multiplayer quiz</title>
+  <meta name="description" content="Quibble is a real-time multiplayer quiz game. Host a room, share a 6-letter code and race your friends. Faster correct answers score more.">
+  <meta name="theme-color" content="#ff5420">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/landing.css">
 </head>
-<body>
+<body class="landing">
   <header class="top">
     <a class="brand" href="/">Quib<span>ble</span></a>
-    <nav id="nav"></nav>
+    <nav>
+      <a class="btn ghost small" href="/play.html" data-auth="out">Log in</a>
+      <a class="btn small" href="/play.html" data-cta>Play now</a>
+    </nav>
   </header>
-  <main id="app"><p class="muted">Loading…</p></main>
-  <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/config.js"></script>
-  <script type="module" src="/js/app.js"></script>
+
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Live multiplayer quiz · up to 50 players</p>
+      <h1>Settle it with a <em>quiz.</em></h1>
+      <p class="lede">Host a room, share a six-letter code, and race your friends through rapid-fire questions. Right answers score points, fast right answers score more.</p>
+      <div class="row cta-row">
+        <a class="btn big" href="/play.html" data-cta>Play now</a>
+        <a class="btn ghost big" href="/play.html?mode=register" data-auth="out">Create an account</a>
+      </div>
+      <p class="muted small-print">Free to play. No downloads, works in any browser.</p>
+    </div>
+
+    <div class="demo" aria-hidden="true">
+      <div class="card demo-card">
+        <div class="qhead"><span>Question 3 / 10 · Science</span><span class="timer" id="demo-timer">12</span></div>
+        <div class="bar"><i id="demo-bar"></i></div>
+        <p class="qtext">Which planet has the shortest day?</p>
+        <div class="opts">
+          <button class="opt dim" tabindex="-1">Earth</button>
+          <button class="opt correct" tabindex="-1">Jupiter</button>
+          <button class="opt dim" tabindex="-1">Mars</button>
+          <button class="opt dim" tabindex="-1">Venus</button>
+        </div>
+      </div>
+      <div class="demo-code">
+        <span class="code-label">Room code</span>
+        <div class="code"><span>Q</span><span>U</span><span>1</span><span>B</span><span>L</span><span>E</span></div>
+      </div>
+      <div class="demo-score"><b>+940</b><span>answered in 1.2s</span></div>
+    </div>
+  </section>
+
+  <main class="sections">
+    <section class="steps" aria-labelledby="how">
+      <h2 id="how">How it works</h2>
+      <ol class="step-list">
+        <li class="card">
+          <span class="step-n">01</span>
+          <h3>Host a room</h3>
+          <p>Pick categories, the number of questions and how long players get to answer each one.</p>
+        </li>
+        <li class="card">
+          <span class="step-n">02</span>
+          <h3>Share the code</h3>
+          <p>Friends join with a six-letter room code. Everyone sees the same question at the same moment.</p>
+        </li>
+        <li class="card">
+          <span class="step-n">03</span>
+          <h3>Race to answer</h3>
+          <p>A correct answer is worth up to 1,000 points, dropping to 500 as the clock runs out. Most points wins.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="cats-section" aria-labelledby="cats">
+      <div class="section-head">
+        <h2 id="cats">126 questions, 12 categories</h2>
+        <p class="muted">From flags and history to the AWS services this game runs on.</p>
+      </div>
+      <ul class="cat-cloud">
+        <li>Technology</li><li>World Geography</li><li>Science</li><li>History</li>
+        <li>Sports</li><li>Entertainment</li><li>Flags</li><li>AWS Fundamentals</li>
+        <li>Compute &amp; Serverless</li><li>Storage &amp; Databases</li><li>Networking &amp; Security</li><li>DevOps &amp; AI/ML</li>
+      </ul>
+    </section>
+
+    <section class="features" aria-labelledby="features">
+      <h2 id="features">Built for game night</h2>
+      <div class="feature-grid">
+        <div class="stat"><b>Live</b>WebSocket updates, no refreshing</div>
+        <div class="stat"><b>Fair</b>Scores are calculated on the server</div>
+        <div class="stat"><b>Resilient</b>Drop out and rejoin mid-game</div>
+        <div class="stat"><b>Ranked</b>Leaderboards and match history</div>
+      </div>
+    </section>
+
+    <section class="stack card" aria-labelledby="stack">
+      <div>
+        <p class="eyebrow">Under the hood</p>
+        <h2 id="stack">Fully serverless on AWS</h2>
+        <p class="muted">No servers to keep running. Rooms, answers and scores move through managed AWS services.</p>
+      </div>
+      <ul class="stack-list">
+        <li>API Gateway WebSockets</li><li>Lambda</li><li>DynamoDB</li>
+        <li>S3</li><li>CloudWatch</li><li>IAM</li>
+      </ul>
+    </section>
+
+    <section class="final">
+      <h2>Ready when you are.</h2>
+      <a class="btn big" href="/play.html" data-cta>Start a game</a>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Quib<span class="accent">ble</span> · MIT licensed</span>
+    <a href="https://github.com/Yash19k/quibble" rel="noopener">Source on GitHub</a>
+  </footer>
+
+  <script>
+    // Logged-in visitors skip straight to their lobby.
+    (function () {
+      var signedIn = false;
+      try { signedIn = !!localStorage.getItem('quibble.token'); } catch (e) {}
+      if (signedIn) {
+        document.querySelectorAll('[data-auth="out"]').forEach(function (n) { n.remove(); });
+        document.querySelectorAll('[data-cta]').forEach(function (n) { n.textContent = 'Go to lobby'; });
+      }
+      // Demo countdown in the hero card.
+      var t = document.getElementById('demo-timer'), bar = document.getElementById('demo-bar');
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var left = 15;
+      setInterval(function () {
+        left = left <= 0 ? 15 : left - 1;
+        t.textContent = left;
+        bar.style.transform = 'scaleX(' + left / 15 + ')';
+      }, 1000);
+    })();
+  </script>
 </body>
 </html>

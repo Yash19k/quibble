@@ -30,7 +30,7 @@ async function boot() {
 function route() {
   clearInterval(tick);
   renderNav();
-  if (!me) return renderAuth();
+  if (!me) return renderAuth(new URLSearchParams(location.search).get('mode') === 'register' ? 'register' : 'login');
   if (room) return renderRoom();
   renderHome();
 }

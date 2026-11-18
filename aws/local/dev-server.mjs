@@ -120,7 +120,7 @@ globalThis.__QUIBBLE_LOCAL__ = {
 };
 
 // ---------- HTTP: /api -> Lambda, everything else -> static files (like S3) ----------
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png' };
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 const publicDir = path.join(ROOT_DIR, 'public');
 
 const server = http.createServer(async (req, res) => {

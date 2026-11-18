@@ -114,6 +114,7 @@ Everything is pay-per-use and nothing runs while idle. Lambda, API Gateway and D
 
 ```
 public/                     frontend (vanilla JS, no build step), deployed to S3
+  index.html                landing page    play.html       game page
   js/app.js                 player app      js/admin.js     admin panel
   js/realtime.js            WebSocket client with acks + auto-reconnect
 aws/

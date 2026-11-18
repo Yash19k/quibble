@@ -55,9 +55,12 @@
   box-shadow: 4px 4px 0 var(--accent); transform: rotate(4deg);
   display: flex; flex-direction: column; align-items: flex-start;
 }
-.demo-score b { font: 800 1.5rem/1 var(--mono); color: var(--good); }
+.demo-score b { font: 800 1.5rem/1 var(--mono); color: #43d196; }
 .demo-score span { font: 500 .7rem var(--mono); opacity: .75; }
-@media (prefers-color-scheme: dark) { .demo-score { background: var(--card); color: var(--ink); border: 2px solid var(--line); } }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .demo-score { background: var(--card); color: var(--ink); border: 2px solid var(--line); }
+}
+:root[data-theme="dark"] .demo-score { background: var(--card); color: var(--ink); border: 2px solid var(--line); }
 
 /* ---------- sections ---------- */
 .sections { max-width: 1120px; padding: 24px 24px 80px; }

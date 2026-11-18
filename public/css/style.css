@@ -23,8 +23,9 @@
   --display: 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
 }
+/* Dark follows the system unless the visitor picked a theme with the header toggle (js/theme.js). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --paper: #16140f;
     --card: #211e18;
     --sunk: #2b2720;
@@ -37,8 +38,25 @@
     --bad: #ff6b5e; --bad-bg: #3b1915;
     --shadow: 4px 4px 0 #000;
     --shadow-sm: 2px 2px 0 #000;
+    color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+  --paper: #16140f;
+  --card: #211e18;
+  --sunk: #2b2720;
+  --ink: #f2ede3;
+  --ink-2: #cfc7b8;
+  --muted: #9a917f;
+  --line: #f2ede3;
+  --hair: #3a352c;
+  --good: #43d196; --good-bg: #13332a;
+  --bad: #ff6b5e; --bad-bg: #3b1915;
+  --shadow: 4px 4px 0 #000;
+  --shadow-sm: 2px 2px 0 #000;
+  color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
 
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
@@ -251,6 +269,16 @@ td.medal.r3 span.rk { background: #d98b4e; color: #171410; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .row > * { flex: 0 0 auto; }
 .row > .grow { flex: 1 1 160px; }
+
+/* ---------- theme toggle ---------- */
+.theme-toggle {
+  margin-left: auto;
+  width: 36px; height: 36px; padding: 0;
+  display: inline-grid; place-items: center;
+  background: var(--card); color: var(--ink);
+}
+.theme-toggle:hover:not(:disabled) { background: var(--sunk); }
+.theme-toggle svg { width: 18px; height: 18px; }
 
 /* ---------- toast ---------- */
 #toast {

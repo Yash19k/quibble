@@ -233,10 +233,17 @@ async function dispose(g) {
 }
 
 // ---------- public operations (called from the WebSocket / HTTP / timer handlers) ----------
-export async function create(user, { category, count, hostPlays = false }) {
+// Label shown in the lobby and match history, e.g. "Science, History" or "Flags, Sports + 3 more".
+function categoryLabel(cats) {
+  if (!cats.length) return null;
+  return cats.length <= 3 ? cats.join(', ') : `${cats.slice(0, 2).join(', ')} + ${cats.length - 2} more`;
+}
+
+export async function create(user, { category, categories, count, hostPlays = false }) {
   if (await gameOfUser(user.id)) throw new GameError("You're already in a game. Leave it first.");
-  const questions = await pickRandom(category, count);
-  if (!questions.length) throw new GameError('There are no questions for that category yet.');
+  const cats = [...new Set([...(categories || []), ...(category ? [category] : [])])];
+  const questions = await pickRandom(cats, count);
+  if (!questions.length) throw new GameError(`There are no questions for ${cats.length > 1 ? 'those categories' : 'that category'} yet.`);
 
   const now = Date.now();
   const g = {
@@ -246,7 +253,8 @@ export async function create(user, { category, count, hostPlays = false }) {
     hostId: user.id,
     hostName: user.username,
     hostPlays: !!hostPlays,
-    category: category ?? null,
+    category: categoryLabel(cats),
+    categories: cats,
     questions,
     qIndex: -1,
     questionStartedAt: 0,

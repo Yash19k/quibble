@@ -186,6 +186,25 @@ test('8 players answering at the same moment: no lost answers', { timeout: 60000
   h.close();
 });
 
+test('host can pick several categories at once', async () => {
+  const host = await register('multi');
+  const h = await connect(host);
+  await h.send('hello');
+  const { categories } = (await api('/api/categories')).body;
+  const picked = categories.slice(0, 2);
+  const pool = picked.reduce((n, c) => n + c.count, 0);
+
+  const bad = await h.send('game:create', { categories: ['No Such Category'], count: 5 });
+  assert.equal(bad.ok, false);
+
+  const created = await h.send('game:create', { categories: picked.map((c) => c.category), count: 30 });
+  assert.equal(created.ok, true, created.error);
+  assert.equal(created.snapshot.total, Math.min(30, pool), 'questions only come from the picked categories');
+  assert.equal(created.snapshot.category, picked.map((c) => c.category).join(', '));
+  assert.equal((await h.send('game:cancel')).ok, true);
+  h.close();
+});
+
 test('admin: stats, question CRUD, ban kicks a live socket', async () => {
   const login = await api('/api/auth/login', { method: 'POST', body: ADMIN });
   assert.equal(login.status, 200, JSON.stringify(login.body));

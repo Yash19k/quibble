@@ -303,6 +303,8 @@ td.medal.r3 span.rk { background: #d98b4e; color: #171410; }
 }
 .cat-box:hover:not(:disabled) { background: var(--sunk); box-shadow: var(--shadow-sm); }
 .cat-box.active, .cat-box.active:hover { background: var(--ink); color: var(--paper); box-shadow: var(--shadow-sm); }
+.cat-box.active::before { content: '✓ '; }
+.cat-hint { margin: 8px 0 0; font: 500 .75rem var(--mono); }
 .cat-box .cat-count { font: 500 .72rem var(--mono); opacity: .6; margin-left: 4px; }
 
 @media (prefers-reduced-motion: reduce) {

@@ -197,31 +197,46 @@ function renderHome() {
 }
 
 async function playTab(body) {
-  let selectedCat = '';
+  const selectedCats = new Set(); // empty = all categories
+  let catCounts = new Map();
   const catGrid = el('div', { class: 'cat-grid' });
+  const catHint = el('p', { class: 'muted cat-hint' });
   const count = el('input', { type: 'number', min: 1, max: 30, value: 10 });
   const hostPlays = el('input', { type: 'checkbox', id: 'host-plays', checked: true });
   const createErr = el('div', { class: 'error', role: 'alert' });
   const code = el('input', { maxlength: 6, placeholder: 'ABC123', autocapitalize: 'characters', style: 'text-transform:uppercase;letter-spacing:.2em;font-size:1.3rem;text-align:center' });
   const joinErr = el('div', { class: 'error', role: 'alert' });
 
-  function selectCat(value) {
-    selectedCat = value;
-    catGrid.querySelectorAll('.cat-box').forEach((b) => b.classList.toggle('active', b.dataset.cat === value));
+  // "All" clears the selection; any other box toggles in or out (pick as many as you like).
+  function toggleCat(value) {
+    if (!value) selectedCats.clear();
+    else if (selectedCats.has(value)) selectedCats.delete(value);
+    else selectedCats.add(value);
+    catGrid.querySelectorAll('.cat-box').forEach((b) => {
+      const on = b.dataset.cat ? selectedCats.has(b.dataset.cat) : selectedCats.size === 0;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    const pool = selectedCats.size
+      ? [...selectedCats].reduce((s, c) => s + (catCounts.get(c) || 0), 0)
+      : [...catCounts.values()].reduce((s, n) => s + n, 0);
+    catHint.textContent = selectedCats.size
+      ? `${selectedCats.size} selected · ${pool} questions available`
+      : `All categories · ${pool} questions available`;
   }
 
   body.append(el('div', { class: 'grid2' },
     el('div', { class: 'card' },
       el('h3', {}, 'Host a game'),
       el('p', { class: 'muted' }, 'Create a room with a 6-character code. Play along or host for others.'),
-      el('label', {}, 'Category'), catGrid,
+      el('label', {}, 'Categories (pick one or more)'), catGrid, catHint,
       el('label', {}, 'Number of questions'), count,
       el('label', { class: 'check-row' }, hostPlays, el('span', {}, 'Participate as a player')),
       createErr,
       el('button', { class: 'block', onclick: async () => {
         createErr.textContent = '';
         const r = await send('game:create', {
-          category: selectedCat || undefined,
+          categories: [...selectedCats],
           count: Number(count.value) || 10,
           hostPlays: hostPlays.checked,
         });
@@ -245,13 +260,15 @@ async function playTab(body) {
   try {
     const { categories } = await api('/api/categories');
     // "All" box first
-    const allBox = el('button', { type: 'button', class: 'cat-box active', 'data-cat': '', onclick: () => selectCat('') },
+    catCounts = new Map(categories.map((c) => [c.category, c.count]));
+    const allBox = el('button', { type: 'button', class: 'cat-box', 'data-cat': '', onclick: () => toggleCat('') },
       'All', el('span', { class: 'cat-count' }, `(${categories.reduce((s, c) => s + c.count, 0)})`));
     catGrid.append(allBox);
     for (const c of categories) {
-      catGrid.append(el('button', { type: 'button', class: 'cat-box', 'data-cat': c.category, onclick: () => selectCat(c.category) },
+      catGrid.append(el('button', { type: 'button', class: 'cat-box', 'data-cat': c.category, onclick: () => toggleCat(c.category) },
         c.category, el('span', { class: 'cat-count' }, `(${c.count})`)));
     }
+    toggleCat(''); // start on "All"
     if (!categories.length) createErr.textContent = 'No questions yet. An admin needs to add some (or run npm run seed).';
   } catch { /* ignore */ }
 }

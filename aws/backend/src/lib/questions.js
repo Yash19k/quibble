@@ -23,9 +23,10 @@ export async function categories() {
   return [...counts].map(([category, count]) => ({ category, count })).sort((a, b) => a.category.localeCompare(b.category));
 }
 
-/** Random sample of `count` questions, optionally from one category. */
-export async function pickRandom(category, count) {
-  const all = (await listQuestions()).filter((q) => !category || q.category === category);
+/** Random sample of `count` questions from the given categories (a name, a list, or empty for all). */
+export async function pickRandom(categories, count) {
+  const wanted = new Set([categories ?? []].flat().filter(Boolean));
+  const all = (await listQuestions()).filter((q) => !wanted.size || wanted.has(q.category));
   for (let i = all.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [all[i], all[j]] = [all[j], all[i]];

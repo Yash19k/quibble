@@ -39,7 +39,8 @@ export const wsSchemas = {
   hello: z.object({}).optional(),
   ping: z.object({}).optional(),
   'game:create': z.object({
-    category: z.string().trim().min(1).max(40).optional(),
+    category: z.string().trim().min(1).max(40).optional(), // single category (older clients)
+    categories: z.array(z.string().trim().min(1).max(40)).max(50).optional(), // empty or missing = all
     count: z.number().int().min(1).max(30).default(10),
     hostPlays: z.boolean().default(false),
   }),

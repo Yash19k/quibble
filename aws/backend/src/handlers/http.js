@@ -216,6 +216,9 @@ export const handler = async (event) => {
   const method = event.requestContext?.http?.method || 'GET';
   const path = event.rawPath || '/';
   const started = Date.now();
+  // CORS preflight: the catch-all ANY route sends OPTIONS here. Answer 204; API Gateway adds the configured CORS
+  // headers. (A 405 here makes browsers block every cross-origin call, e.g. sign-up from the S3 website.)
+  if (method === 'OPTIONS') return { statusCode: 204, headers: { 'cache-control': 'no-store' }, body: '' };
   try {
     let pathMatched = false;
     for (const r of compiled) {

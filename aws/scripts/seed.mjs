@@ -3,15 +3,25 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { stackOutputs } from './stack.mjs';
 import { QUESTIONS } from './questions.js';
 
+// AWS SDK clients (stack.mjs: root devDependencies; lib/*: aws/backend) - explain a missing one instead of crashing.
+async function load(spec) {
+  try {
+    return await import(spec);
+  } catch (err) {
+    console.error(`Missing a dependency (${err.message}). Run "npm install" in the project folder.`);
+    process.exit(1);
+  }
+}
+
+const { stackOutputs } = await load('./stack.mjs');
 const out = await stackOutputs();
 process.env.USERS_TABLE = out.UsersTableName;
 process.env.QUESTIONS_TABLE = out.QuestionsTableName;
 
-const { upsertAdmin } = await import('../backend/src/lib/users.js');
-const { insertMany } = await import('../backend/src/lib/questions.js');
+const { upsertAdmin } = await load('../backend/src/lib/users.js');
+const { insertMany } = await load('../backend/src/lib/questions.js');
 
 const email = process.env.ADMIN_EMAIL || 'admin@example.com';
 const username = process.env.ADMIN_USERNAME || 'admin';

@@ -1,7 +1,7 @@
 # Quibble
 
 **Quibble is a real-time multiplayer quiz game built entirely on serverless AWS.**
-One person hosts a game and gets a 6-character code, friends join from their phones, and everyone races the same countdown. Faster correct answers score more points.
+One person hosts a game and gets a 6-character code, up to 250 players join from their phones, and everyone races the same countdown. Faster correct answers score more points.
 
 `API Gateway (WebSocket + HTTP)` · `AWS Lambda` · `Amazon DynamoDB` · `Amazon S3` · `Amazon CloudWatch` · `AWS IAM`
 
@@ -9,28 +9,28 @@ One person hosts a game and gets a 6-character code, friends join from their pho
 
 ## Features
 
-- **Live multiplayer** over WebSockets: lobby, synchronized countdown, per-question results, final podium
+- **Live multiplayer** over WebSockets for up to 250 players per game: lobby, synchronized countdown, per-question results, final podium
 - **The server decides everything.** It holds the answers, runs the clock, measures answer speed and scores every answer. The browser only ever sends "I picked option 2"
 - **Speed scoring:** 1000 points for an instant correct answer, sliding down to 500 at the buzzer
-- **Reconnect-safe:** refresh or drop your connection mid-game and you land back in the same question
+- **Reconnect-safe and self-healing:** refresh or drop your connection mid-game and you land back in the same question; a missed update is recovered automatically
 - **Leaderboards** (all-time and this week) and a personal match history
 - **Admin panel:** question editor, one-click trivia import from Open Trivia DB, promote or ban users (a ban kicks them out of live games instantly), usage stats
-- **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP login limiting, API Gateway throttling, least-privilege IAM roles
+- **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP sign-up and failed-login limits (sized for a whole classroom on one Wi-Fi), API Gateway throttling, least-privilege IAM roles
 - **Observability:** structured logs, custom game metrics, alarms and a CloudWatch dashboard, all created by the template
 
 ## Architecture
 
 ```
-                 ┌──────────── Amazon S3 static website (the frontend)
+                 ┌──────────── Amazon S3 (the frontend, over HTTPS)
  Browser ────────┤
                  ├── HTTPS ──► API Gateway HTTP API ──► Lambda: api ─────────────────┐
                  │                                       (auth, leaderboards, admin)  │
                  └── WSS ────► API Gateway WebSocket API                              ▼
                                  $connect    ──► Lambda: ws-connect           Amazon DynamoDB
                                  $default    ──► Lambda: ws-message  ──────►  Users · Questions
-                                 $disconnect ──► Lambda: ws-disconnect        Games · Connections
-                                                    │  ▲                      Results · RateLimits
-                     async invoke at deadline ──────┘  │ PostToConnection
+                                 $disconnect ──► Lambda: ws-disconnect        Games · GamePlay
+                                                    │  ▲                      Connections · Results
+                     async invoke at deadline ──────┘  │ PostToConnection     RateLimits
                                  Lambda: game-timer ───┘ (pushes events to every player)
 
  Amazon CloudWatch  log groups (14-day retention) · alarms · custom metrics · dashboard
@@ -42,18 +42,31 @@ One person hosts a game and gets a 6-character code, friends join from their pho
 | **API Gateway WebSocket API** | Persistent connection for gameplay: `$connect` authenticates, `$default` handles game actions, `$disconnect` marks players offline |
 | **API Gateway HTTP API** | REST endpoints for login, leaderboards, history and the admin panel |
 | **AWS Lambda** | Five Node.js 22 functions on arm64: `api`, `ws-connect`, `ws-message`, `ws-disconnect`, `game-timer` |
-| **Amazon DynamoDB** | Six on-demand tables. TTL cleans up old games, sockets and rate-limit counters |
-| **Amazon S3** | Hosts the static frontend as a public website |
-| **Amazon CloudWatch** | Logs, 4 alarms, a dashboard and custom metrics in the `Quibble` namespace |
+| **Amazon DynamoDB** | Seven on-demand tables. TTL cleans up old games, game-play items, sockets and rate-limit counters |
+| **Amazon S3** | Hosts the static frontend, served over HTTPS |
+| **Amazon CloudWatch** | Logs, alarms, a dashboard and custom metrics in the `Quibble` namespace |
 | **AWS IAM** | Least-privilege execution role per function |
 
 ### How a game stays consistent without a server
 
-Lambdas are stateless and short-lived, so a game can't live in memory and can't use `setTimeout`.
+Lambdas are stateless and short-lived, so a game can't live in memory and can't use `setTimeout`. And 250 people answering in the same instant must not all write the same database item.
 
-- **State:** every live game is a single DynamoDB item. Every change is a *conditional write* on the item's `version` number. If two Lambdas race (say, 30 players answering in the same second), the loser re-reads and retries, so no answer is ever lost.
-- **Time:** whoever moves a game into a new phase (question open, results showing) also invokes the `game-timer` Lambda asynchronously with that phase's deadline. The timer waits, then closes the question or opens the next one. If everyone answers early, the question closes at once and the waiting timer notices within about 1.5 s and exits.
-- **Push:** Lambdas send events to players' browsers through the API Gateway Management API (`PostToConnection`).
+- **State is split by who writes it.** The `Games` table holds one small *header* per game (status, current question, deadlines, a `version` number) that changes only when the game moves to a new phase. Everything players write at the same moment lives in the `GamePlay` table, where each kind of item has its own partition key, so no key gets more than one burst:
+
+  | Partition key | Items |
+  |---|---|
+  | `<code>#P` | one per member: seat number and open sockets |
+  | `<code>#L` | the lobby gate: seat counter and player limit |
+  | `<code>#Q` | one gate per question: deadline, answered count, the seats that answered |
+  | `<code>#A#<k>` | one item per answer to question k |
+  | `<code>#S` / `<code>#R` | running scores / each question's result |
+  | `<code>#M`, `<code>#B` | the game's questions / broadcast and recovery leases |
+
+- **Answers** are two small conditional writes and no reads: store the answer (only if it isn't there yet, so a resend keeps its first arrival time), then add the seat to the question's gate (only while the question is open and if that seat hasn't counted yet). Speed is measured from API Gateway's arrival time, so a slow Lambda never costs a player points. Answers that arrive up to `LATE_GRACE_MS` (1.5 s) after the buzzer still count.
+- **Phase changes** (open a question, show its result, end the game) are DynamoDB transactions guarded by the header's `version`: when several Lambdas try the same step, exactly one wins and the others do nothing.
+- **Time:** whoever moves a game into a new phase invokes the `game-timer` Lambda asynchronously with that phase's deadline. While a question is open the timer pushes "x of y answered" about once a second; at the deadline it scores the question; after the reveal it opens the next one. If everyone answers early, the question closes at once.
+- **Push:** Lambdas send events to players' browsers through the API Gateway Management API (`PostToConnection`), addressed to the sockets listed on each member item. Every event carries the game's `version`, so browsers ignore stale or repeated ones.
+- **Self-healing:** pushes and `$disconnect` events can get lost. A browser that waits too long for the next phase sends `sync` and gets a full snapshot of the game; if a timer died, that `sync` also restarts it (under a short lease, so 250 browsers don't all try).
 
 ## Run it locally (no AWS account needed)
 
@@ -65,28 +78,33 @@ docker run -d -p 8000:8000 --name quibble-dynamodb amazon/dynamodb-local
 npm run dev            # http://localhost:5050   (admin@example.com / admin12345)
 ```
 
-`npm run dev` runs the **real Lambda handlers** against DynamoDB Local, with a small Node server standing in for API Gateway. It creates the tables and sample questions on first start. Open two browser windows (one private) to play against yourself.
+`npm run dev` runs the **real Lambda handlers** against DynamoDB Local, with a small Node server standing in for API Gateway. It creates the tables and sample questions on first start. Open two browser windows (one private) to play against yourself. Optional settings are listed in `.env.example`.
 
 ```bash
-npm test               # unit tests (scoring)
+npm test               # unit tests (scoring, game views, leaderboards, rate limits)
 npm run test:e2e       # end-to-end games over real WebSockets (needs npm run dev running)
+npm run test:load      # 200 players in one game (needs npm run dev running; see "Capacity & scaling")
 ```
 
 ## Deploy to AWS
 
 **One-time setup**
 
-1. Install the [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) and the [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html).
+1. Install the [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) and the [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) (1.123 or newer).
 2. Run `aws configure` with an IAM user or SSO profile that can create the resources, and pick a region.
+3. Ask AWS to raise the account's Lambda concurrency to the standard 1,000 (free): `npm run quota:lambda -- --request`. New accounts get only 10; see [Capacity & scaling](#capacity--scaling).
 
 **Deploy**
 
 ```bash
+npm run preflight      # checks SAM CLI, credentials, region, Lambda quota and live games
 npm run deploy         # sam build + sam deploy + upload the frontend to S3
-npm run seed           # first time only: admin account + 68 sample questions
+npm run seed           # first time only: admin account + the sample questions
 ```
 
-The deploy prints the `WebsiteUrl`. Run `npm run deploy` again to ship changes. If only the frontend changed, `npm run publish` is enough.
+The deploy prints the **`WebsiteUrl`**, an HTTPS link like `https://<bucket>.s3.<region>.amazonaws.com/index.html`. Share that one. The old plain-HTTP website address is still there (`WebsiteHttpUrl`), but browsers warn about HTTP pages. The HTTPS address has no index page, so links always name a file: `/index.html`, `/play.html?code=ABC123`.
+
+Run `npm run deploy` again to ship changes. If only the frontend changed, `npm run publish` is enough. Template parameters go after `--` as `Name=value` (for example `npm run deploy -- LateGraceMs=5000 MaxPlayers=250`) and stay set for later deploys until you change them.
 
 - The login-token secret is generated on the first deploy and kept in `aws/.jwt-secret`, which is git-ignored.
 - Because the site is public, `npm run seed` generates a strong admin password unless `.env` sets one of 10 or more characters.
@@ -100,10 +118,77 @@ QA_API=<HttpApiUrl> QA_WS=<WebSocketUrl> ADMIN_PASSWORD=<admin password> npm run
 
 **Tear down:** empty the website bucket, then run `sam delete --stack-name quibble`.
 
+## Capacity & scaling
+
+**Targets**, checked by the load test:
+
+- 200 people sign up at the same moment from one network (a classroom or venue Wi-Fi), and all succeed.
+- 250 players (the `MaxPlayers` parameter) join one game within seconds and answer the same question within the same 100 ms: every answer is accepted and scored, with no errors shown.
+- Every DynamoDB partition key stays below ~30% of its limits (1,000 writes/s and 3,000 reads/s) in any burst.
+- Every player sees every phase; a lost update heals itself within seconds.
+
+**Limits that matter**
+
+| Limit | Value | At the limit |
+|---|---|---|
+| Lambda concurrent executions (per account and region, shared by every function) | **10** on new accounts; standard 1,000 | invocations are throttled; the page retries, so things slow down |
+| API Gateway, per account | 10,000 requests/s (5,000 burst), 500 new WebSocket connections/s | throttled requests are retried by the page |
+| Stage throttles set by the template | HTTP API and WebSocket API: 1,000 requests/s, 2,000 burst each | 429, retried |
+| WebSocket connections | 32 KB frames, 10 min idle, 2 h maximum | the page reconnects and resyncs |
+| DynamoDB, per partition key | 1,000 writes/s, 3,000 reads/s | the data model keeps every key far below |
+
+**The Lambda quota is the one to fix before a big game.** With 10 concurrent executions, 250 players answering at once queue behind 10 slots. Nothing is lost (API Gateway refuses the extra requests and the page resends them with backoff), but phases show up seconds late, and answers sent in the final moments can miss the deadline. Raising it to the standard 1,000 is free and usually approved within a day:
+
+```bash
+npm run quota:lambda                 # current value and any open request
+npm run quota:lambda -- --request    # ask for 1,000 (Service Quotas code L-B99A9384)
+```
+
+Until it's raised, deploy with a longer answer grace period so late-arriving answers still count, and set it back afterwards:
+
+```bash
+npm run deploy -- LateGraceMs=5000   # while the quota is low
+npm run deploy -- LateGraceMs=1500   # after the raise (the default)
+```
+
+The functions deliberately reserve no concurrency: a reservation carves slots out of the shared pool, and isn't possible at all on a 10-slot account.
+
+**Load test locally.** The dev server can behave like a 10-slot account (throttled calls fail exactly as they do on AWS), drop some `$disconnect` events (AWS only tries its best to send them) and measure DynamoDB capacity per partition key (which DynamoDB Local doesn't limit):
+
+```bash
+# terminal 1 (or put these variables in .env)
+LOCAL_LAMBDA_CONCURRENCY=10 LOCAL_DROP_DISCONNECT_PCT=10 LOCAL_TRACK_CAPACITY=1 npm run dev
+# terminal 2
+npm run test:load -- --players 200 --questions 12 --spread 0 --silent 10 --late 20 --drop 15
+```
+
+In PowerShell, set the variables first: `$env:LOCAL_LAMBDA_CONCURRENCY=10; $env:LOCAL_TRACK_CAPACITY=1; npm run dev`.
+
+The load test signs up the players at once from one IP, has them join one game (plus a duplicate tab), plays every question with all of them answering in the same instant (`--silent` never answer, `--late` answer in the last half second, `--drop` % lose their connection for a few seconds mid-question), forces mass reconnects, and fails unless every request succeeded, every accepted answer was counted, every player saw every phase, results were saved and every partition key stayed under 30% of its limits. It prints p50/p95/max latencies.
+
+| `LOCAL_LAMBDA_CONCURRENCY` exceeded on… | What the client sees (same as AWS) |
+|---|---|
+| an HTTP API call | `500 {"message":"Internal Server Error"}` |
+| a WebSocket message | a frame `{"message":"Internal server error","connectionId":…,"requestId":…}` |
+| a WebSocket connect | the connection is refused (browser close code 1006) |
+| a game-timer invoke | the event is re-queued with 1, 2, 4 … s backoff (up to 30 s) |
+
+Two endpoints show what happened: `GET /__local/stats` (invocations, throttles, dropped disconnects, timer re-queues) and `GET /__local/capacity` (peak DynamoDB units per second per table and per partition key, with `LOCAL_TRACK_CAPACITY=1`). Add `?reset=1` to start counting afresh.
+
+## Before an event
+
+- [ ] Lambda concurrency quota is 1,000: `npm run quota:lambda` (request it days ahead with `-- --request`)
+- [ ] AWS SAM CLI 1.123 or newer: `sam --version`
+- [ ] `npm run preflight` passes (use `-- --allow-degraded` only if you accept slower phases on a low quota)
+- [ ] Deployed the latest version with `npm run deploy`; if the quota is still low, with `-- LateGraceMs=5000`
+- [ ] Shared the **HTTPS** `WebsiteUrl` (`https://…amazonaws.com/index.html`), or a join link from the lobby (`…/play.html?code=ABC123`)
+- [ ] The CloudWatch dashboard is open: Lambda concurrency and throttles, DynamoDB throttles
+- [ ] No deploys while a game is running (preflight warns about live games)
+
 ## Monitoring
 
-- **Dashboard** (the `DashboardUrl` output): games created, started, finished and cancelled, answers, WebSocket connections, API latency and errors, Lambda errors and duration, and a live table of recent error logs.
-- **Alarms:** `quibble-api-lambda-errors`, `quibble-websocket-lambda-errors`, `quibble-game-timer-errors`, `quibble-http-api-5xx`.
+- **Dashboard** (the `DashboardUrl` output): games created, started, finished and cancelled, answers, Lambda concurrency and throttles (account-wide and per function), DynamoDB throttles and GamePlay capacity, WebSocket connections, API latency and errors, Lambda errors and duration, and a live table of recent error logs.
+- **Alarms:** `quibble-api-lambda-errors`, `quibble-websocket-lambda-errors`, `quibble-game-timer-errors`, `quibble-http-api-5xx`, `quibble-lambda-throttles` (account-wide), `quibble-game-timer-events-dropped`, `quibble-game-timer-late`, and read/write throttle alarms for the GamePlay and Games tables.
 - **Logs Insights:** `fields @timestamp, msg, error.message | filter level = "error" | sort @timestamp desc`
 
 ## Cost
@@ -116,21 +201,22 @@ Everything is pay-per-use and nothing runs while idle. Lambda, API Gateway and D
 public/                     frontend (vanilla JS, no build step), deployed to S3
   index.html                landing page    play.html       game page
   js/app.js                 player app      js/admin.js     admin panel
-  js/realtime.js            WebSocket client with acks + auto-reconnect
+  js/realtime.js            WebSocket client with acks, resends + auto-reconnect
+  js/net.js                 HTTP client with retries and backoff
 aws/
   template.yaml             all infrastructure (AWS SAM / CloudFormation)
   backend/src/handlers/     the five Lambda entry points
   backend/src/lib/          game engine, DynamoDB access, auth, push, metrics
-  scripts/                  deploy, publish frontend, seed
-  local/dev-server.mjs      local stand-in for API Gateway + Lambda
-  tests/                    unit + end-to-end tests
+  scripts/                  deploy, publish frontend, seed, preflight, Lambda quota
+  local/dev-server.mjs      local stand-in for API Gateway + Lambda (with failure emulation)
+  tests/                    unit, end-to-end and load tests
 ```
 
 ## Known trade-offs
 
-- Leaderboards and admin stats use DynamoDB scans. That's fine for thousands of games. At larger scale, keep running totals with DynamoDB Streams.
+- Leaderboards are recomputed with one scan of the Results table after each game and stored as a single item that page loads read. That's fine for thousands of games. At larger scale, keep running totals with DynamoDB Streams.
 - The JWT secret is a Lambda environment variable. For production, move it to Secrets Manager or SSM Parameter Store.
-- The S3 website endpoint is HTTP only. Put CloudFront in front of it for HTTPS and a custom domain.
+- The site is served from S3's HTTPS endpoint, which has no index page and an `amazonaws.com` address. Put CloudFront in front of the bucket for a custom domain and `/` URLs.
 
 ## License
 

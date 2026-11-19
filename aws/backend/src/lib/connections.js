@@ -1,74 +1,74 @@
 // Connections table: one item per open WebSocket.
-//   connectionId (PK), userId, gameCode (optional), connectedAt, expiresAt (TTL)
-// GSIs: byUser (userId) to reach / kick all of a user's tabs, byGame (gameCode) to broadcast.
+//   connectionId (PK), userId, gameCode?, seat?, tokenIat, connectedAt, expiresAt (TTL)
+// GSI byUser (userId) reaches all of a user's tabs (attaching other tabs to a game, closing a banned user's sockets).
+// Game broadcasts never come from this table: their targets are the `conns` sets on the game's member items
+// (lib/gamedata.js), read with a strongly consistent Query.
 import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ddb, queryAll, isConditionFailed, nowIso } from './db.js';
 import { env } from './config.js';
 
-const TTL_SECONDS = 3 * 60 * 60; // API Gateway closes sockets after 2h anyway
+const TTL_SECONDS = 3 * 60 * 60; // API Gateway closes sockets after 2 h anyway
 
-export async function saveConnection(connectionId, userId) {
+export async function saveConnection(connectionId, userId, tokenIat) {
   await ddb.send(new PutCommand({
     TableName: env.connectionsTable,
-    Item: { connectionId, userId, connectedAt: nowIso(), expiresAt: Math.floor(Date.now() / 1000) + TTL_SECONDS },
+    Item: { connectionId, userId, tokenIat, connectedAt: nowIso(), expiresAt: Math.floor(Date.now() / 1000) + TTL_SECONDS },
   }));
 }
 
-export async function getConnection(connectionId) {
-  const res = await ddb.send(new GetCommand({ TableName: env.connectionsTable, Key: { connectionId } }));
+/** Strongly consistent by default: the record may have been written milliseconds ago ($connect, attach). */
+export async function getConnection(connectionId, { consistent = true } = {}) {
+  const res = await ddb.send(new GetCommand({ TableName: env.connectionsTable, Key: { connectionId }, ConsistentRead: consistent }));
   return res.Item || null;
 }
 
+/** Deletes the record and returns what it held (null if it was already gone). */
 export async function deleteConnectionRecord(connectionId) {
-  await ddb.send(new DeleteCommand({ TableName: env.connectionsTable, Key: { connectionId } }));
+  const res = await ddb.send(new DeleteCommand({ TableName: env.connectionsTable, Key: { connectionId }, ReturnValues: 'ALL_OLD' }));
+  return res.Attributes || null;
 }
 
+/** All open sockets of a user (GSI, eventually consistent: a socket opened a moment ago may be missing). */
 export async function connectionsForUser(userId) {
   return queryAll({
     TableName: env.connectionsTable,
     IndexName: 'byUser',
-    KeyConditionExpression: 'userId = :u',
+    KeyConditionExpression: '#u = :u',
+    ExpressionAttributeNames: { '#u': 'userId' },
     ExpressionAttributeValues: { ':u': userId },
   });
 }
 
-export async function connectionsForGame(code) {
-  return queryAll({
-    TableName: env.connectionsTable,
-    IndexName: 'byGame',
-    KeyConditionExpression: 'gameCode = :g',
-    ExpressionAttributeValues: { ':g': code },
-  });
-}
-
-async function setGame(connectionId, code) {
+/** Point a socket at a game (and its seat; 0 = presenter). False if the socket is already closed. */
+export async function setConnectionGame(connectionId, code, seat) {
   try {
     await ddb.send(new UpdateCommand({
       TableName: env.connectionsTable,
       Key: { connectionId },
-      UpdateExpression: code ? 'SET gameCode = :g' : 'REMOVE gameCode',
-      ConditionExpression: 'attribute_exists(connectionId)', // don't resurrect a closed socket
-      ExpressionAttributeValues: code ? { ':g': code } : undefined,
+      UpdateExpression: 'SET #g = :g, #s = :s',
+      ConditionExpression: 'attribute_exists(#id)', // never resurrect a closed socket's record
+      ExpressionAttributeNames: { '#g': 'gameCode', '#s': 'seat', '#id': 'connectionId' },
+      ExpressionAttributeValues: { ':g': code, ':s': seat ?? 0 },
+    }));
+    return true;
+  } catch (err) {
+    if (isConditionFailed(err)) return false;
+    throw err;
+  }
+}
+
+/** Take a socket out of a game, if it still points at that game. */
+export async function clearConnectionGame(connectionId, code) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: env.connectionsTable,
+      Key: { connectionId },
+      UpdateExpression: 'REMOVE #g, #s',
+      ConditionExpression: '#g = :g',
+      ExpressionAttributeNames: { '#g': 'gameCode', '#s': 'seat' },
+      ExpressionAttributeValues: { ':g': code },
     }));
   } catch (err) {
     if (!isConditionFailed(err)) throw err;
   }
-}
-
-/** Subscribe every open tab of this user to a game's broadcasts. */
-export async function attachUserToGame(userId, code) {
-  const conns = await connectionsForUser(userId);
-  await Promise.all(conns.map((c) => setGame(c.connectionId, code)));
-}
-
-/** Unsubscribe this user's tabs from a game. */
-export async function detachUserFromGame(userId, code) {
-  const conns = await connectionsForUser(userId);
-  await Promise.all(conns.filter((c) => c.gameCode === code).map((c) => setGame(c.connectionId, null)));
-}
-
-/** Unsubscribe everyone from a finished / cancelled game. */
-export async function detachAllFromGame(code) {
-  const conns = await connectionsForGame(code);
-  await Promise.all(conns.map((c) => setGame(c.connectionId, null)));
 }

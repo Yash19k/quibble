@@ -1,45 +1,90 @@
-// Tiny helpers shared by the player app and the admin panel.
+// Helpers shared by the player app and the admin panel.
+// Nothing here touches the DOM at module load, so the pure helpers at the bottom can be unit-tested in Node.
+import { request } from './net.js';
 
 // config.js (generated at deploy time) says where the API Gateway endpoints live.
-const CONFIG = window.QUIBBLE_CONFIG || {};
+const CONFIG = globalThis.QUIBBLE_CONFIG || {};
 export const API_URL = (CONFIG.apiUrl || '').replace(/\/$/, '');
-export const WS_URL = CONFIG.wsUrl || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+export const WS_URL = CONFIG.wsUrl
+  || (typeof location !== 'undefined' ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws` : '');
 
-// The login token lives in localStorage and is sent as a Bearer header (the site and the APIs
-// are on different origins, so a cookie won't do). All rendering uses textContent, so XSS
-// can't read it out.
-const TOKEN_KEY = 'quibble.token';
-export function getToken() {
-  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
-}
-export function setToken(token) {
+export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---------- storage ----------
+// Storage can be missing or throw (private mode, blocked cookies). Memory keeps the session working for this page.
+const memory = new Map();
+function readKey(key, area = 'localStorage') {
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch { /* private mode: stays logged in for this page only */ }
+    const value = globalThis[area]?.getItem(key);
+    if (value != null) return value;
+  } catch { /* unavailable */ }
+  return memory.has(`${area}:${key}`) ? memory.get(`${area}:${key}`) : null;
 }
-
-export async function api(path, { method = 'GET', body } = {}) {
-  const headers = {};
-  if (body) headers['Content-Type'] = 'application/json';
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(API_URL + path, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  let data = null;
-  try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) {
-    const err = new Error(data?.error || `Request failed (${res.status})`);
-    err.status = res.status;
-    throw err;
+/** Returns true when the value reached real storage (not just memory). */
+function writeKey(key, value, area = 'localStorage') {
+  if (value == null) memory.delete(`${area}:${key}`);
+  else memory.set(`${area}:${key}`, value);
+  try {
+    const store = globalThis[area];
+    if (!store) return false;
+    if (value == null) store.removeItem(key);
+    else store.setItem(key, value);
+    return true;
+  } catch {
+    return false;
   }
-  return data;
+}
+export const session = {
+  get: (key) => readKey(key, 'sessionStorage'),
+  set: (key, value) => writeKey(key, value, 'sessionStorage'),
+};
+
+// The login token is sent as a Bearer header (the site and the APIs are on different origins, so a cookie won't
+// do). All rendering uses textContent, so injected HTML can't read it out.
+const TOKEN_KEY = 'quibble.token';
+const PROFILE_KEY = 'quibble.profile'; // last known public profile: the page renders at once, without /api/auth/me
+const EMAIL_KEY = 'quibble.email'; // pre-fills the login form
+
+export const getToken = () => readKey(TOKEN_KEY);
+export function setToken(token) {
+  writeKey(TOKEN_KEY, token || null);
+}
+export function getProfile() {
+  try { return JSON.parse(readKey(PROFILE_KEY) || 'null'); } catch { return null; }
+}
+export function setProfile(user) {
+  writeKey(PROFILE_KEY, user ? JSON.stringify({ id: user.id, email: user.email, username: user.username, role: user.role }) : null);
+}
+export const getLastEmail = () => readKey(EMAIL_KEY) || '';
+export const setLastEmail = (email) => writeKey(EMAIL_KEY, email || null);
+
+// ---------- REST ----------
+const BUSY_TEXT = 'Server busy, still trying…';
+let apiRetrying = 0;
+
+/** Calls the REST API with retries (see net.js). Throws an Error with .status, .body and .field. */
+export async function api(path, { method = 'GET', body, budgetMs } = {}) {
+  let retried = false;
+  try {
+    return await request(API_URL, path, {
+      method,
+      body,
+      budgetMs,
+      token: getToken(),
+      onRetry: () => {
+        if (retried) return;
+        retried = true;
+        apiRetrying += 1;
+        setNotice('busy-api', BUSY_TEXT);
+      },
+    });
+  } finally {
+    if (retried && --apiRetrying === 0) setNotice('busy-api', null);
+  }
 }
 
-// el('div', {class:'x', onclick: fn}, 'text', childEl) — builds DOM with textContent only,
+// ---------- DOM ----------
+// el('div', {class:'x', onclick: fn}, 'text', childEl) - builds DOM with textContent only,
 // so user-provided text (usernames, question text) can never inject HTML.
 export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -63,11 +108,71 @@ export function clear(node) { node.replaceChildren(); return node; }
 let toastTimer;
 export function toast(msg) {
   const t = document.getElementById('toast');
-  if (!t) return;
+  if (!t || !msg) return;
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+// One status bar for connection trouble. Several sources can be active; the most important one is shown.
+const NOTICE_RANK = { offline: 0, reconnecting: 1, 'busy-ws': 2, 'busy-api': 3 };
+const notices = new Map();
+export function setNotice(key, text) {
+  if (text) notices.set(key, text);
+  else notices.delete(key);
+  if (typeof document === 'undefined') return;
+  let bar = document.getElementById('netbar');
+  if (!bar) {
+    bar = el('div', { id: 'netbar', class: 'netbar', role: 'status', 'aria-live': 'polite', hidden: true });
+    const header = document.querySelector('header.top');
+    if (header) header.after(bar);
+    else document.body.prepend(bar);
+  }
+  const top = [...notices.keys()].sort((a, b) => (NOTICE_RANK[a] ?? 9) - (NOTICE_RANK[b] ?? 9))[0];
+  bar.hidden = !top;
+  bar.textContent = top ? notices.get(top) : '';
+  if (top) bar.dataset.kind = top;
+}
+
+/**
+ * Runs `fn` with the button disabled and showing `label` (e.g. "Joining…"), so a slow server can't be
+ * double-submitted. Returns fn's result, or undefined when the button was already busy.
+ */
+export async function withPending(button, label, fn) {
+  if (!button || button.getAttribute('aria-busy') === 'true') return undefined;
+  const kids = [...button.childNodes];
+  const wasDisabled = button.disabled;
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.classList.add('pending');
+  if (label) button.replaceChildren(label);
+  try {
+    return await fn();
+  } finally {
+    button.disabled = wasDisabled;
+    button.removeAttribute('aria-busy');
+    button.classList.remove('pending');
+    if (label) button.replaceChildren(...kids);
+  }
+}
+
+/** Copies text. The Clipboard API needs HTTPS; plain-HTTP pages fall back to selecting `input` + execCommand. */
+export async function copyText(text, input) {
+  try {
+    if (globalThis.isSecureContext && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall back */ }
+  try {
+    input?.focus();
+    input?.select();
+    input?.setSelectionRange?.(0, text.length);
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  }
 }
 
 // 1 -> "1st", 2 -> "2nd", 11 -> "11th", 23 -> "23rd"
@@ -79,3 +184,80 @@ export const medal = (rank) => {
 
 // Rank cell for tables; CSS gives the top three gold / silver / bronze badges.
 export const rankCell = (rank) => el('td', { class: `medal r${rank}` }, el('span', { class: 'rk' }, rank));
+
+// ---------- pure helpers (no DOM; unit-tested in Node) ----------
+
+/** Random hex id. Uses crypto.getRandomValues: randomUUID/subtle don't exist on plain-HTTP pages. */
+export function randomId(bytes = 16) {
+  const a = new Uint8Array(bytes);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(a);
+  else for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); // very old browsers only
+  return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** The JWT payload ({sub, iat, exp}) without verifying it (the server does that), or null. */
+export function decodeJwt(token) {
+  try {
+    const part = String(token).split('.')[1];
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(b64.padEnd(Math.ceil(b64.length / 4) * 4, '=')));
+  } catch {
+    return null;
+  }
+}
+
+/** Is the token unreadable or (about to be) expired? A minute of slack for clock skew. */
+export function tokenExpired(token, now = Date.now()) {
+  const payload = decodeJwt(token);
+  if (!payload?.sub) return true;
+  return typeof payload.exp === 'number' && payload.exp * 1000 <= now + 60_000;
+}
+
+/** "?code=abc123" -> "ABC123" (null unless it looks like a game code). */
+export function parseJoinCode(search) {
+  const raw = new URLSearchParams(search || '').get('code') || '';
+  const code = raw.trim().toUpperCase();
+  return /^[A-Z0-9]{6}$/.test(code) ? code : null;
+}
+
+/** The shareable link for a game, next to the current page (works under any path or bucket host). */
+export function joinUrl(code, pageHref) {
+  const url = new URL('play.html', pageHref);
+  url.search = `?code=${encodeURIComponent(code)}`;
+  url.hash = '';
+  return url.href;
+}
+
+/** Top rows of a board plus my own row when it isn't among them. */
+export function splitBoard(rows, me, size = 10) {
+  const top = (rows || []).slice(0, size);
+  const inTop = !!me && top.some((r) => r.userId === me.userId);
+  return { top, me: me && !inTop ? me : null };
+}
+
+/**
+ * What the lobby shows. The host gets every member; players get the most recent joiners only, so the
+ * rest is summed up as "and N more". A presenter host (not playing) isn't listed as a player.
+ */
+export function lobbyView(room, meId) {
+  const presenter = (p) => p.userId === room.hostId && !room.hostPlays;
+  const chips = (room.players || []).filter((p) => !presenter(p)).map((p) => ({
+    userId: p.userId,
+    username: p.username,
+    connected: p.connected !== false,
+    host: p.userId === room.hostId,
+    me: p.userId === meId,
+  }));
+  const playerCount = Math.max(Number(room.playerCount) || 0, chips.length);
+  return { chips, playerCount, more: playerCount - chips.length };
+}
+
+/** Is this server update older than what we already show for the same game? (`v` = the game's version) */
+export function isStale(room, data) {
+  return !!room && !!data && room.code === data.code
+    && typeof room.v === 'number' && typeof data.v === 'number' && data.v < room.v;
+}
+
+/** Answer errors that can't be fixed by trying again; anything else re-enables the options. */
+const FINAL_ANSWER_ERRORS = new Set(['Too late!', 'No question is open right now.']);
+export const isFinalAnswerError = (error) => FINAL_ANSWER_ERRORS.has(error);

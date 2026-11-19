@@ -17,6 +17,20 @@ Parameters:
     Type: Number
     Default: 4000
     Description: Pause between a question's result and the next question (ms).
+  MaxPlayers:
+    Type: Number
+    Default: 250
+    MinValue: 1
+    MaxValue: 1000
+    Description: Most players one game accepts (load-tested at 250).
+  LateGraceMs:
+    Type: Number
+    Default: 1500
+    MinValue: 1
+    MaxValue: 10000
+    Description: >
+      Answers that reached API Gateway up to this long after a question's timer hit zero still count.
+      Raise it (e.g. 5000) while the account's Lambda concurrency quota is still low.
   LogRetentionDays:
     Type: Number
     Default: 14
@@ -31,18 +45,28 @@ Globals:
     Runtime: nodejs22.x
     Architectures: [arm64]
     CodeUri: backend/
-    MemorySize: 256
-    Timeout: 10
+    MemorySize: 512 # more memory = more CPU: fan-out to 250 sockets and JSON work finish sooner
+    Timeout: 15
+    # No reserved concurrency anywhere: it carves slots out of the shared account pool (and is impossible while the
+    # account quota is still the 10-slot default).
     Environment:
       Variables:
         USERS_TABLE: !Ref UsersTable
         QUESTIONS_TABLE: !Ref QuestionsTable
         GAMES_TABLE: !Ref GamesTable
+        GAMEPLAY_TABLE: !Ref GamePlayTable
         CONNECTIONS_TABLE: !Ref ConnectionsTable
         RESULTS_TABLE: !Ref ResultsTable
         RATE_LIMITS_TABLE: !Ref RateLimitsTable
         JWT_SECRET: !Ref JwtSecret
         REVEAL_MS: !Ref RevealMs
+        MAX_PLAYERS: !Ref MaxPlayers
+        LATE_GRACE_MS: !Ref LateGraceMs
+        BROADCAST_WINDOW_MS: '500' # lobby lists are pushed at most once per window per game
+        # Sized so a whole classroom behind one Wi-Fi IP can sign up and log in at once.
+        REGISTER_MAX_PER_IP: '500' # sign-ups per IP per hour
+        LOGIN_FAIL_MAX_PER_IP: '200' # failed logins per IP per 15 min
+        LOGIN_FAIL_MAX_PER_EMAIL: '10' # failed logins per account per 15 min
         WS_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStageName}'
         # A plain name (not !Ref) so the timer function can reference itself without a circular dependency.
         TIMER_FUNCTION: !Sub '${AWS::StackName}-game-timer'
@@ -67,6 +91,7 @@ Resources:
       KeySchema: [{ AttributeName: id, KeyType: HASH }]
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
+  # One small header item per game, written only when the game changes phase.
   GamesTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -75,6 +100,22 @@ Resources:
       KeySchema: [{ AttributeName: code, KeyType: HASH }]
       TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
 
+  # Everything many players write at once (seats, answers, question gates, scores, results). Each item family has
+  # its own partition key (<code>#P, <code>#A#<k>, <code>#Q ...) so no key takes more than one family's burst and
+  # every key stays far below DynamoDB's per-partition limits. Items expire a day after the game.
+  GamePlayTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
+
+  # Fan-out reads a game's members (and their connection ids) from GamePlayTable, so there's no byGame index here.
   ConnectionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -82,17 +123,14 @@ Resources:
       AttributeDefinitions:
         - { AttributeName: connectionId, AttributeType: S }
         - { AttributeName: userId, AttributeType: S }
-        - { AttributeName: gameCode, AttributeType: S }
       KeySchema: [{ AttributeName: connectionId, KeyType: HASH }]
       GlobalSecondaryIndexes:
         - IndexName: byUser
           KeySchema: [{ AttributeName: userId, KeyType: HASH }]
           Projection: { ProjectionType: ALL }
-        - IndexName: byGame
-          KeySchema: [{ AttributeName: gameCode, KeyType: HASH }]
-          Projection: { ProjectionType: ALL }
       TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
 
+  # Per-player game results, plus the materialised leaderboards (userId '#board').
   ResultsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -114,7 +152,9 @@ Resources:
       TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
 
   # =====================================================================
-  # S3 static website (the frontend in public/)
+  # S3 static website (the frontend in public/). Players use the HTTPS REST endpoint
+  # (https://<bucket>.s3.<region>.amazonaws.com/index.html, the WebsiteUrl output): browsers warn on plain HTTP
+  # pages. The HTTP website endpoint (WebsiteHttpUrl) keeps working for old links.
   # =====================================================================
   FrontendBucket:
     Type: AWS::S3::Bucket
@@ -150,17 +190,20 @@ Resources:
     Properties:
       CorsConfiguration:
         AllowOrigins:
-          - !GetAtt FrontendBucket.WebsiteURL
+          - !Sub 'https://${FrontendBucket.RegionalDomainName}' # the HTTPS page players open
+          - !GetAtt FrontendBucket.WebsiteURL # the old HTTP website endpoint
           - !Ref ExtraCorsOrigin
         AllowHeaders: [content-type, authorization]
         AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        ExposeHeaders: [retry-after] # the page honours Retry-After when it backs off
         MaxAge: 600
+      # Whole-API ceiling (the account allows 10,000 rps shared by every API). 200 sign-ups at once is far below.
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 100
-        ThrottlingRateLimit: 50
+        ThrottlingBurstLimit: 2000
+        ThrottlingRateLimit: 1000
       AccessLogSettings:
         DestinationArn: !GetAtt HttpApiAccessLogs.Arn
-        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latencyMs":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}'
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latencyMs":"$context.responseLatency","error":"$context.error.message","integrationError":"$context.integrationErrorMessage"}'
 
   HttpApiAccessLogs:
     Type: AWS::Logs::LogGroup
@@ -230,9 +273,10 @@ Resources:
       ApiId: !Ref WebSocketApi
       StageName: !Ref WebSocketStageName
       DeploymentId: !Ref WebSocketDeployment
+      # 250 players answering within the same 100 ms is a 250-message burst; leave plenty of headroom.
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 200
-        ThrottlingRateLimit: 100
+        ThrottlingBurstLimit: 2000
+        ThrottlingRateLimit: 1000
 
   WsConnectPermission:
     Type: AWS::Lambda::Permission
@@ -265,7 +309,7 @@ Resources:
     Properties:
       Description: REST API (auth, leaderboard, history, admin)
       Handler: src/handlers/http.handler
-      MemorySize: 512 # bcrypt is CPU-bound; more memory = more CPU
+      MemorySize: 1769 # one full vCPU: bcrypt is CPU-bound and 200 people may sign up at once
       Timeout: 20 # trivia import calls an external API
       LoggingConfig: { LogGroup: !Ref ApiLogGroup }
       Events:
@@ -279,8 +323,9 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
         - DynamoDBCrudPolicy: { TableName: !Ref QuestionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GamesTable } # admin ban kicks players from live games
+        - DynamoDBCrudPolicy: { TableName: !Ref GamePlayTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref ResultsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable } # leaderboards are materialised on read and after bans
         - DynamoDBCrudPolicy: { TableName: !Ref RateLimitsTable }
         - Statement:
             - Effect: Allow
@@ -289,9 +334,6 @@ Resources:
             - Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-game-timer'
-            - Effect: Allow # results are written when a kicked player's departure ends a question
-              Action: [dynamodb:PutItem, dynamodb:BatchWriteItem]
-              Resource: !GetAtt ResultsTable.Arn
 
   WsConnectFunction:
     Type: AWS::Serverless::Function
@@ -313,6 +355,7 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
         - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GamesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamePlayTable } # a departure can close a question early
         - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable }
         - Statement:
@@ -330,9 +373,10 @@ Resources:
       Handler: src/handlers/wsMessage.handler
       LoggingConfig: { LogGroup: !Ref WsLogGroup }
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref UsersTable } # creating a game is one transaction with the user item
         - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GamesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamePlayTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable }
         - Statement:
@@ -349,18 +393,22 @@ Resources:
       FunctionName: !Sub '${AWS::StackName}-game-timer'
       Description: Waits for a question/reveal deadline, then advances the game
       Handler: src/handlers/gameTimer.handler
-      Timeout: 90
-      MemorySize: 128
+      MemorySize: 512 # pushes each question and result to every player
+      Timeout: 120
+      # Each timer schedules the next one (question -> reveal -> question ...). Without this, Lambda's recursive-loop
+      # detection stops the chain after ~16 hops, i.e. in the middle of a game.
+      RecursiveLoop: Allow
       LoggingConfig: { LogGroup: !Ref TimerLogGroup }
       EventInvokeConfig:
-        MaximumRetryAttempts: 2
-        MaximumEventAgeInSeconds: 300
+        MaximumRetryAttempts: 2 # every step is idempotent, so a retry is safe
+        MaximumEventAgeInSeconds: 600 # throttled events wait in Lambda's queue (with backoff) this long
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
         - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GamesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GamePlayTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ResultsTable } # final results + leaderboards
         - Statement:
             - Effect: Allow
               Action: execute-api:ManageConnections
@@ -450,6 +498,112 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
+  # Account-wide (no dimensions): every function in this account and region shares one concurrency pool, so a
+  # throttle anywhere means players are waiting. See "Capacity & scaling" in the README.
+  LambdaThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-lambda-throttles'
+      AlarmDescription: Lambda throttled invocations in this account and region (concurrency quota reached)
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  TimerEventsDroppedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-game-timer-events-dropped'
+      AlarmDescription: Lambda dropped game-timer events (too old or out of retries); players recover via sync
+      Namespace: AWS/Lambda
+      MetricName: AsyncEventsDropped
+      Dimensions: [{ Name: FunctionName, Value: !Ref GameTimerFunction }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  TimerEventAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-game-timer-late'
+      AlarmDescription: Game-timer events waited 5 s or more in Lambda's queue (throttling or retries), so phases ran late
+      Namespace: AWS/Lambda
+      MetricName: AsyncEventAge
+      Dimensions: [{ Name: FunctionName, Value: !Ref GameTimerFunction }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5000 # milliseconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  GamePlayWriteThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-gameplay-table-write-throttles'
+      AlarmDescription: DynamoDB throttled writes to the GamePlay table (a hot partition key)
+      Namespace: AWS/DynamoDB
+      MetricName: WriteThrottleEvents
+      Dimensions: [{ Name: TableName, Value: !Ref GamePlayTable }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  GamePlayReadThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-gameplay-table-read-throttles'
+      AlarmDescription: DynamoDB throttled reads from the GamePlay table (a hot partition key)
+      Namespace: AWS/DynamoDB
+      MetricName: ReadThrottleEvents
+      Dimensions: [{ Name: TableName, Value: !Ref GamePlayTable }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  GamesWriteThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-games-table-write-throttles'
+      AlarmDescription: DynamoDB throttled writes to the Games table (a hot game header)
+      Namespace: AWS/DynamoDB
+      MetricName: WriteThrottleEvents
+      Dimensions: [{ Name: TableName, Value: !Ref GamesTable }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  GamesReadThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-games-table-read-throttles'
+      AlarmDescription: DynamoDB throttled reads from the Games table (a hot game header)
+      Namespace: AWS/DynamoDB
+      MetricName: ReadThrottleEvents
+      Dimensions: [{ Name: TableName, Value: !Ref GamesTable }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
   Dashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
@@ -468,6 +622,41 @@ Resources:
                   [ "Quibble", "AnswersSubmitted" ], [ ".", "QuestionsAsked" ], [ ".", "UsersRegistered" ], [ ".", "GameWriteConflicts" ]
                 ] } },
             { "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6, "properties": {
+                "title": "Lambda concurrency (max per minute)", "region": "${AWS::Region}", "stat": "Maximum", "period": 60, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "ConcurrentExecutions", { "label": "Whole account" } ],
+                  [ "AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${WsMessageFunction}" ],
+                  [ "...", "${GameTimerFunction}" ],
+                  [ "...", "${ApiFunction}" ],
+                  [ "...", "${WsConnectFunction}" ],
+                  [ "...", "${WsDisconnectFunction}" ]
+                ] } },
+            { "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6, "properties": {
+                "title": "Lambda throttles (should stay at 0)", "region": "${AWS::Region}", "stat": "Sum", "period": 60, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Throttles", { "label": "Whole account" } ],
+                  [ "AWS/Lambda", "Throttles", "FunctionName", "${WsMessageFunction}" ],
+                  [ "...", "${GameTimerFunction}" ],
+                  [ "...", "${ApiFunction}" ],
+                  [ "...", "${WsConnectFunction}" ],
+                  [ "AWS/Lambda", "AsyncEventsDropped", "FunctionName", "${GameTimerFunction}", { "label": "Timer events dropped" } ]
+                ] } },
+            { "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6, "properties": {
+                "title": "DynamoDB throttles (should stay at 0)", "region": "${AWS::Region}", "stat": "Sum", "period": 60, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/DynamoDB", "WriteThrottleEvents", "TableName", "${GamePlayTable}", { "label": "GamePlay writes" } ],
+                  [ ".", "ReadThrottleEvents", ".", ".", { "label": "GamePlay reads" } ],
+                  [ ".", "WriteThrottleEvents", ".", "${GamesTable}", { "label": "Games writes" } ],
+                  [ ".", "ReadThrottleEvents", ".", ".", { "label": "Games reads" } ],
+                  [ ".", "WriteThrottleEvents", ".", "${UsersTable}", { "label": "Users writes" } ]
+                ] } },
+            { "type": "metric", "x": 12, "y": 12, "width": 12, "height": 6, "properties": {
+                "title": "GamePlay table capacity used (units per minute)", "region": "${AWS::Region}", "stat": "Sum", "period": 60, "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${GamePlayTable}" ],
+                  [ ".", "ConsumedReadCapacityUnits", ".", "." ]
+                ] } },
+            { "type": "metric", "x": 0, "y": 18, "width": 12, "height": 6, "properties": {
                 "title": "WebSocket API", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
                 "metrics": [
                   [ "AWS/ApiGateway", "ConnectCount", "ApiId", "${WebSocketApi}", "Stage", "${WebSocketStageName}" ],
@@ -475,7 +664,7 @@ Resources:
                   [ ".", "ClientError", ".", ".", ".", "." ],
                   [ ".", "ExecutionError", ".", ".", ".", "." ]
                 ] } },
-            { "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6, "properties": {
+            { "type": "metric", "x": 12, "y": 18, "width": 12, "height": 6, "properties": {
                 "title": "HTTP API", "region": "${AWS::Region}", "period": 300, "view": "timeSeries",
                 "metrics": [
                   [ "AWS/ApiGateway", "Count", "ApiId", "${HttpApi}", "Stage", "$default", { "stat": "Sum" } ],
@@ -483,7 +672,7 @@ Resources:
                   [ ".", "5xx", ".", ".", ".", ".", { "stat": "Sum" } ],
                   [ ".", "Latency", ".", ".", ".", ".", { "stat": "p90", "yAxis": "right" } ]
                 ] } },
-            { "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6, "properties": {
+            { "type": "metric", "x": 0, "y": 24, "width": 12, "height": 6, "properties": {
                 "title": "Lambda errors", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
                 "metrics": [
                   [ "AWS/Lambda", "Errors", "FunctionName", "${ApiFunction}" ],
@@ -492,13 +681,13 @@ Resources:
                   [ "...", "${WsDisconnectFunction}" ],
                   [ "...", "${GameTimerFunction}" ]
                 ] } },
-            { "type": "metric", "x": 12, "y": 12, "width": 12, "height": 6, "properties": {
+            { "type": "metric", "x": 12, "y": 24, "width": 12, "height": 6, "properties": {
                 "title": "Lambda duration p90 (ms)", "region": "${AWS::Region}", "stat": "p90", "period": 300, "view": "timeSeries",
                 "metrics": [
                   [ "AWS/Lambda", "Duration", "FunctionName", "${ApiFunction}" ],
                   [ "...", "${WsMessageFunction}" ]
                 ] } },
-            { "type": "log", "x": 0, "y": 18, "width": 24, "height": 6, "properties": {
+            { "type": "log", "x": 0, "y": 30, "width": 24, "height": 6, "properties": {
                 "title": "Recent errors", "region": "${AWS::Region}", "view": "table",
                 "query": "SOURCE '${ApiLogGroup}' | SOURCE '${WsLogGroup}' | SOURCE '${TimerLogGroup}' | fields @timestamp, msg, error.message | filter level = 'error' | sort @timestamp desc | limit 20"
               } }
@@ -507,7 +696,10 @@ Resources:
 
 Outputs:
   WebsiteUrl:
-    Description: Open this in a browser
+    Description: Share this link with players (HTTPS)
+    Value: !Sub 'https://${FrontendBucket.RegionalDomainName}/index.html'
+  WebsiteHttpUrl:
+    Description: The same site over plain HTTP (S3 website endpoint; browsers warn about it)
     Value: !GetAtt FrontendBucket.WebsiteURL
   HttpApiUrl:
     Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
@@ -519,5 +711,9 @@ Outputs:
     Value: !Ref UsersTable
   QuestionsTableName:
     Value: !Ref QuestionsTable
+  GamesTableName:
+    Value: !Ref GamesTable
+  GamePlayTableName:
+    Value: !Ref GamePlayTable
   DashboardUrl:
     Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}'

@@ -3,23 +3,24 @@ import bcrypt from 'bcryptjs';
 import { requireAuth, requireAdmin, signToken } from '../lib/auth.js';
 import { createUser, getUserByEmail, listUsers, publicUser, updateUser } from '../lib/users.js';
 import { categories, createQuestion, deleteQuestion, insertMany, listQuestions, mapQuestion, updateQuestion } from '../lib/questions.js';
-import { leaderboard, history, aggregate, allResults } from '../lib/results.js';
+import { leaderboard, history, aggregate, allResults, refreshBoards } from '../lib/results.js';
 import { gameStats, kickUser } from '../lib/game.js';
 import { fetchTriviaQuestions, OPENTDB_CATEGORIES } from '../lib/trivia.js';
-import { limitAuth } from '../lib/ratelimit.js';
+import { limitRegister, assertLoginAllowed, recordLoginFailure } from '../lib/ratelimit.js';
 import { HttpError } from '../lib/errors.js';
 import { parse, registerSchema, loginSchema, questionSchema, userPatchSchema, triviaImportSchema } from '../lib/schemas.js';
 import { log, metric } from '../lib/log.js';
 
 const MAX_BODY = 50 * 1024;
+const BCRYPT_COST = 10;
 
 // Compared against when the email doesn't exist, so response time doesn't reveal which emails are registered.
 let dummyHash;
-const getDummyHash = () => (dummyHash ??= bcrypt.hashSync('not-a-real-password', 10));
+const getDummyHash = () => (dummyHash ??= bcrypt.hashSync('not-a-real-password', BCRYPT_COST));
 
-const json = (statusCode, body) => ({
+const json = (statusCode, body, headers = {}) => ({
   statusCode,
-  headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers },
   body: JSON.stringify(body),
 });
 
@@ -34,24 +35,32 @@ function readBody(event) {
   }
 }
 
+const sourceIp = (event) => event.requestContext?.http?.sourceIp || 'unknown';
+
 // ---------- routes ----------
 const routes = [
   ['GET', '/api/health', async () => ({ ok: true })],
 
   ['POST', '/api/auth/register', async ({ event, body }) => {
-    await limitAuth(event.requestContext.http.sourceIp);
-    const { email, username, password } = parse(registerSchema, body);
-    const user = await createUser({ email, username, passwordHash: await bcrypt.hash(password, 10) });
+    const { email, username, password } = parse(registerSchema, body); // a typo doesn't use up the IP's sign-ups
+    await limitRegister(sourceIp(event));
+    // A taken email/username -> 409 {error, field}; the page then tries logging in (the first attempt may have worked).
+    const user = await createUser({ email, username, passwordHash: await bcrypt.hash(password, BCRYPT_COST) });
     metric('UsersRegistered');
     return [201, { user: publicUser(user), token: signToken(user.id) }];
   }],
 
   ['POST', '/api/auth/login', async ({ event, body }) => {
-    await limitAuth(event.requestContext.http.sourceIp);
     const { email, password } = parse(loginSchema, body);
-    const user = await getUserByEmail(email);
+    const ip = sourceIp(event);
+    // The limit is checked before the (CPU-heavy) bcrypt compare. Consistent read: the account may be seconds old.
+    const [, user] = await Promise.all([assertLoginAllowed(ip, email), getUserByEmail(email, { consistent: true })]);
     const ok = await bcrypt.compare(password, user ? user.passwordHash : getDummyHash());
-    if (!user || !ok) throw new HttpError(401, 'Invalid email or password');
+    if (!user || !ok) {
+      // Best effort: failing to count a failure must not turn "wrong password" into a server error.
+      await recordLoginFailure(ip, email).catch((error) => log('warn', 'Could not record a failed login', { error }));
+      throw new HttpError(401, 'Invalid email or password');
+    }
     if (user.banned) throw new HttpError(403, 'This account has been banned');
     return { user: publicUser(user), token: signToken(user.id) };
   }],
@@ -71,12 +80,12 @@ const routes = [
 
   ['GET', '/api/me/history', async ({ event }) => history((await requireAuth(event)).id)],
 
-  // ---------- admin ----------
+  // ---------- admin (fresh question reads: the question cache is per container and the panel reloads after edits) ----------
   ['GET', '/api/admin/questions', async ({ event, query }) => {
     await requireAdmin(event);
     const q = String(query.q || '').trim().toLowerCase();
     const category = String(query.category || '');
-    const questions = (await listQuestions())
+    const questions = (await listQuestions({ fresh: true }))
       .filter((x) => (!q || x.text.toLowerCase().includes(q)) && (!category || x.category === category))
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
       .slice(0, 500)
@@ -139,12 +148,14 @@ const routes = [
     const patch = parse(userPatchSchema, body);
     const user = await updateUser(params.id, patch);
     if (patch.banned) await kickUser(params.id); // drop them from any live game / socket right away
+    // Boards hide banned players: take them off now (or put them back after an unban). Safe to repeat on a retry.
+    if (patch.banned !== undefined) await refreshBoards();
     return { user: { ...publicUser(user), banned: !!user.banned } };
   }],
 
   ['GET', '/api/admin/stats', async ({ event }) => {
     await requireAdmin(event);
-    const [users, questions, rows, games] = await Promise.all([listUsers(), listQuestions(), allResults(), gameStats()]);
+    const [users, questions, rows, games] = await Promise.all([listUsers(), listQuestions({ fresh: true }), allResults(), gameStats()]);
     const byCat = new Map();
     for (const q of questions) byCat.set(q.category, (byCat.get(q.category) || 0) + 1);
     return {
@@ -172,6 +183,35 @@ const compiled = routes.map(([method, path, fn]) => {
   return { method, re, names, fn };
 });
 
+// ---------- errors ----------
+// AWS throttling / outages that outlasted the SDK's own retries. They answer 503, which the page (public/js/net.js)
+// retries with backoff, instead of a 500 it would show as a failure.
+const TRANSIENT_NAMES = new Set([
+  'ThrottlingException', 'ProvisionedThroughputExceededException', 'RequestLimitExceeded', 'TooManyRequestsException',
+  'TransactionConflictException', 'InternalServerError', 'ServiceUnavailable', 'TimeoutError',
+]);
+const TRANSIENT_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ECONNREFUSED', 'EAI_AGAIN']);
+const isTransient = (err) =>
+  TRANSIENT_NAMES.has(err?.name) || TRANSIENT_CODES.has(err?.code) || err?.$fault === 'server' || !!err?.$retryable;
+
+function errorResponse(err, { method, path, event }) {
+  if (err instanceof HttpError) {
+    if (err.status === 503) log('warn', 'API busy', { method, path, error: err });
+    // `extra` fields (e.g. 409 `field`, 429 `retryAfter`) go into the body next to `error`.
+    const retryAfter = err.extra?.retryAfter;
+    return json(err.status, { error: err.message, ...err.extra }, retryAfter ? { 'retry-after': String(retryAfter) } : {});
+  }
+  if (err.validation) return json(400, { error: err.message });
+  if (err instanceof URIError) return json(400, { error: 'Invalid URL' }); // malformed %-escape in a path parameter
+  if (isTransient(err)) {
+    log('warn', 'API busy (AWS throttling or outage)', { method, path, error: err });
+    return json(503, { error: 'Server busy, please try again.' });
+  }
+  // Never leak stack traces to clients; they go to CloudWatch Logs instead.
+  log('error', 'Unhandled API error', { method, path, error: err, requestId: event.requestContext?.requestId });
+  return json(500, { error: 'Internal server error' });
+}
+
 export const handler = async (event) => {
   const method = event.requestContext?.http?.method || 'GET';
   const path = event.rawPath || '/';
@@ -191,11 +231,7 @@ export const handler = async (event) => {
     }
     return pathMatched ? json(405, { error: 'Method not allowed' }) : json(404, { error: 'Not found' });
   } catch (err) {
-    if (err instanceof HttpError) return json(err.status, { error: err.message });
-    if (err.validation) return json(400, { error: err.message });
-    // Never leak stack traces to clients; they go to CloudWatch Logs instead.
-    log('error', 'Unhandled API error', { method, path, error: err, requestId: event.requestContext?.requestId });
-    return json(500, { error: 'Internal server error' });
+    return errorResponse(err, { method, path, event });
   } finally {
     if (Date.now() - started > 3000) log('warn', 'Slow request', { method, path, ms: Date.now() - started });
   }

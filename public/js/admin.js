@@ -1,15 +1,17 @@
-import { api, el, clear, toast } from './common.js';
+import { api, el, clear, toast, withPending } from './common.js';
 
 const app = document.getElementById('app');
 let tab = 'stats';
 
 init();
 async function init() {
+  clear(app).append(el('p', { class: 'muted' }, 'Loading…'));
   try {
     const { user } = await api('/api/auth/me');
     if (user.role !== 'admin') return deny('You need an admin account to see this page.');
-  } catch {
-    return deny('Please log in with an admin account first.');
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) return deny('Please log in with an admin account first.');
+    return failed(app, err, init); // server busy or unreachable: not a reason to send them to the login page
   }
   render();
 }
@@ -18,22 +20,41 @@ function deny(msg) {
   clear(app).append(el('div', { class: 'card narrow' }, el('h2', {}, 'Admins only'), el('p', { class: 'muted' }, msg), el('a', { class: 'btn', href: '/play.html' }, 'Go to login')));
 }
 
+/** A load failed: say why and offer a retry instead of leaving a blank page. */
+function failed(body, err, retry) {
+  clear(body).append(el('div', { class: 'card' },
+    el('p', { class: 'error' }, err.message),
+    el('button', { class: 'ghost', onclick: retry }, 'Try again')));
+}
+
 function render() {
   const body = el('div');
   clear(app).append(
-    el('div', { class: 'tabs' }, ...[['stats', 'Stats'], ['questions', 'Questions'], ['users', 'Users']].map(([id, label]) =>
-      el('button', { class: tab === id ? 'active' : '', onclick: () => { tab = id; render(); } }, label))),
+    el('div', { class: 'tabs', role: 'tablist' }, ...[['stats', 'Stats'], ['questions', 'Questions'], ['users', 'Users']].map(([id, label]) =>
+      el('button', { role: 'tab', 'aria-selected': String(tab === id), class: tab === id ? 'active' : '', onclick: () => { tab = id; render(); } }, label))),
     body);
   ({ stats: statsTab, questions: questionsTab, users: usersTab })[tab](body);
 }
 
-const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message); } };
+/** Click handler: shows `label` on the button while `fn` runs; errors become a toast. */
+const action = (label, fn) => async (e) => {
+  const button = e.currentTarget;
+  await withPending(button, label, async () => {
+    try { await fn(); } catch (err) { toast(err.message); }
+  });
+};
 
 // ---------- stats ----------
 async function statsTab(body) {
-  const s = await api('/api/admin/stats');
+  clear(body).append(el('p', { class: 'muted' }, 'Loading…'));
+  let s;
+  try {
+    s = await api('/api/admin/stats');
+  } catch (err) {
+    return failed(body, err, () => statsTab(body));
+  }
   const stat = (n, label) => el('div', { class: 'stat' }, el('b', {}, n), label);
-  body.append(
+  clear(body).append(
     el('div', { class: 'stats' },
       stat(s.totals.users, 'users'), stat(s.totals.questions, 'questions'),
       stat(s.totals.gamesPlayed, 'games played'), stat(s.liveGames, 'live games now'), stat(s.totals.bannedUsers, 'banned users')),
@@ -54,9 +75,15 @@ function table(head, rows) {
 
 // ---------- questions ----------
 async function questionsTab(body, search = '') {
-  const { questions } = await api(`/api/admin/questions?q=${encodeURIComponent(search)}`);
-  const q = el('input', { placeholder: 'Search questions…', value: search });
-  q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clear(body); questionsTab(body, q.value); } });
+  clear(body).append(el('p', { class: 'muted' }, 'Loading…'));
+  let questions;
+  try {
+    ({ questions } = await api(`/api/admin/questions?q=${encodeURIComponent(search)}`));
+  } catch (err) {
+    return failed(body, err, () => questionsTab(body, search));
+  }
+  const q = el('input', { placeholder: 'Search questions…', value: search, 'aria-label': 'Search questions' });
+  q.addEventListener('keydown', (e) => { if (e.key === 'Enter') questionsTab(body, q.value); });
 
   clear(body).append(
     el('div', { class: 'row', style: 'margin-bottom:12px' },
@@ -72,22 +99,39 @@ async function questionsTab(body, search = '') {
             el('td', {}, x.options[x.correctIndex]),
             el('td', { class: 'num', style: 'white-space:nowrap' },
               el('button', { class: 'ghost small', onclick: () => questionForm(body, x) }, 'Edit'), ' ',
-              el('button', { class: 'danger small', onclick: guard(async () => {
+              el('button', { class: 'danger small', onclick: async (e) => {
                 if (!confirm('Delete this question?')) return;
-                await api(`/api/admin/questions/${x.id}`, { method: 'DELETE' });
-                toast('Deleted');
-                questionsTab(body, search);
-              }) }, 'Delete'))))))
+                await action('Deleting…', async () => {
+                  await api(`/api/admin/questions/${x.id}`, { method: 'DELETE' });
+                  toast('Deleted');
+                  questionsTab(body, search);
+                })(e);
+              } }, 'Delete'))))))
       : el('p', { class: 'muted' }, 'No questions found.')));
 }
 
 function questionForm(body, existing) {
-  const text = el('textarea', { rows: 2, maxlength: 300, value: existing?.text || '' });
-  const category = el('input', { maxlength: 40, value: existing?.category || 'General' });
-  const time = el('input', { type: 'number', min: 5, max: 60, value: existing?.timeLimit || 20 });
-  const opts = [0, 1, 2, 3].map((i) => el('input', { maxlength: 100, placeholder: i < 2 ? `Option ${i + 1} (required)` : `Option ${i + 1} (optional)`, value: existing?.options[i] || '' }));
+  const text = el('textarea', { rows: 2, maxlength: 300, value: existing?.text || '', 'aria-label': 'Question' });
+  const category = el('input', { maxlength: 40, value: existing?.category || 'General', 'aria-label': 'Category' });
+  const time = el('input', { type: 'number', min: 5, max: 60, value: existing?.timeLimit || 20, 'aria-label': 'Time limit (seconds)' });
+  const opts = [0, 1, 2, 3].map((i) => el('input', { maxlength: 100, placeholder: i < 2 ? `Option ${i + 1} (required)` : `Option ${i + 1} (optional)`, value: existing?.options[i] || '', 'aria-label': `Option ${i + 1}` }));
   const radios = [0, 1, 2, 3].map((i) => el('input', { type: 'radio', name: 'correct', value: i, checked: (existing?.correctIndex ?? 0) === i, 'aria-label': `Option ${i + 1} is correct` }));
   const error = el('div', { class: 'error', role: 'alert' });
+
+  const save = el('button', { onclick: () => withPending(save, 'Saving…', async () => {
+    error.textContent = '';
+    // Keep only non-empty options and re-map which one is correct.
+    const filled = opts.map((o, i) => ({ v: o.value.trim(), i })).filter((o) => o.v);
+    const correct = radios.findIndex((r) => r.checked);
+    const correctIndex = filled.findIndex((o) => o.i === correct);
+    if (correctIndex < 0) return (error.textContent = 'The correct answer must not be empty.');
+    const payload = { text: text.value, options: filled.map((o) => o.v), correctIndex, category: category.value, timeLimit: Number(time.value) };
+    try {
+      await api(existing ? `/api/admin/questions/${existing.id}` : '/api/admin/questions', { method: existing ? 'PUT' : 'POST', body: payload });
+      toast('Saved');
+      questionsTab(body);
+    } catch (e) { error.textContent = e.message; }
+  }) }, 'Save');
 
   clear(body).append(el('div', { class: 'card' },
     el('h3', {}, existing ? 'Edit question' : 'New question'),
@@ -97,20 +141,7 @@ function questionForm(body, existing) {
     el('div', { class: 'grid2' }, el('div', {}, el('label', {}, 'Category'), category), el('div', {}, el('label', {}, 'Time limit (seconds)'), time)),
     error,
     el('div', { class: 'row', style: 'margin-top:12px' },
-      el('button', { onclick: async () => {
-        error.textContent = '';
-        // Keep only non-empty options and re-map which one is correct.
-        const filled = opts.map((o, i) => ({ v: o.value.trim(), i })).filter((o) => o.v);
-        const correct = radios.findIndex((r) => r.checked);
-        const correctIndex = filled.findIndex((o) => o.i === correct);
-        if (correctIndex < 0) return (error.textContent = 'The correct answer must not be empty.');
-        const payload = { text: text.value, options: filled.map((o) => o.v), correctIndex, category: category.value, timeLimit: Number(time.value) };
-        try {
-          await api(existing ? `/api/admin/questions/${existing.id}` : '/api/admin/questions', { method: existing ? 'PUT' : 'POST', body: payload });
-          toast('Saved');
-          questionsTab(body);
-        } catch (e) { error.textContent = e.message; }
-      } }, 'Save'),
+      save,
       el('button', { class: 'ghost', onclick: () => questionsTab(body) }, 'Cancel'))));
 }
 
@@ -119,26 +150,25 @@ async function importTriviaModal(body) {
   try {
     const res = await api('/api/admin/trivia/categories');
     categories = res.categories || {};
-  } catch { /* fallback */ }
+  } catch { /* fallback: "any category" only */ }
 
-  const catSelect = el('select', {},
+  const catSelect = el('select', { 'aria-label': 'Category' },
     el('option', { value: '' }, 'Any Category (Random)'),
     ...Object.entries(categories).map(([name, id]) => el('option', { value: id }, name)));
 
-  const countInput = el('input', { type: 'number', min: 1, max: 50, value: 10 });
-  const diffSelect = el('select', {},
+  const countInput = el('input', { type: 'number', min: 1, max: 50, value: 10, 'aria-label': 'Number of questions' });
+  const diffSelect = el('select', { 'aria-label': 'Difficulty' },
     el('option', { value: '' }, 'Any Difficulty'),
     el('option', { value: 'easy' }, 'Easy'),
     el('option', { value: 'medium' }, 'Medium'),
     el('option', { value: 'hard' }, 'Hard'));
 
-  const status = el('div', { class: 'muted', style: 'margin-top:10px' });
+  const status = el('div', { class: 'muted', style: 'margin-top:10px', role: 'status' });
   const error = el('div', { class: 'error', role: 'alert' });
   const btn = el('button', {
-    onclick: async () => {
+    onclick: () => withPending(btn, 'Importing…', async () => {
       error.textContent = '';
       status.textContent = 'Fetching trivia questions from the web…';
-      btn.disabled = true;
       try {
         const res = await api('/api/admin/trivia/import', {
           method: 'POST',
@@ -153,9 +183,8 @@ async function importTriviaModal(body) {
       } catch (err) {
         error.textContent = err.message;
         status.textContent = '';
-        btn.disabled = false;
       }
-    },
+    }),
   }, 'Import Now');
 
   clear(body).append(el('div', { class: 'card narrow' },
@@ -172,10 +201,16 @@ async function importTriviaModal(body) {
 
 // ---------- users ----------
 async function usersTab(body, search = '') {
-  const { users } = await api(`/api/admin/users?q=${encodeURIComponent(search)}`);
-  const q = el('input', { placeholder: 'Search username or email…', value: search });
-  q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clear(body); usersTab(body, q.value); } });
-  const patch = (u, change, msg) => guard(async () => {
+  clear(body).append(el('p', { class: 'muted' }, 'Loading…'));
+  let users;
+  try {
+    ({ users } = await api(`/api/admin/users?q=${encodeURIComponent(search)}`));
+  } catch (err) {
+    return failed(body, err, () => usersTab(body, search));
+  }
+  const q = el('input', { placeholder: 'Search username or email…', value: search, 'aria-label': 'Search users' });
+  q.addEventListener('keydown', (e) => { if (e.key === 'Enter') usersTab(body, q.value); });
+  const patch = (u, change, label, msg) => action(label, async () => {
     await api(`/api/admin/users/${u.id}`, { method: 'PATCH', body: change });
     toast(msg);
     usersTab(body, search);
@@ -192,6 +227,6 @@ async function usersTab(body, search = '') {
         el('td', {}, u.gamesPlayed),
         el('td', {}, u.banned ? el('span', { class: 'pill bad' }, 'banned') : 'active'),
         el('td', { style: 'white-space:nowrap' },
-          el('button', { class: 'ghost small', onclick: patch(u, { role: u.role === 'admin' ? 'player' : 'admin' }, 'Role updated') }, u.role === 'admin' ? 'Demote' : 'Make admin'), ' ',
-          el('button', { class: `${u.banned ? 'ghost' : 'danger'} small`, onclick: patch(u, { banned: !u.banned }, u.banned ? 'Unbanned' : 'Banned') }, u.banned ? 'Unban' : 'Ban'))))))));
+          el('button', { class: 'ghost small', onclick: patch(u, { role: u.role === 'admin' ? 'player' : 'admin' }, 'Saving…', 'Role updated') }, u.role === 'admin' ? 'Demote' : 'Make admin'), ' ',
+          el('button', { class: `${u.banned ? 'ghost' : 'danger'} small`, onclick: patch(u, { banned: !u.banned }, u.banned ? 'Unbanning…' : 'Banning…', u.banned ? 'Unbanned' : 'Banned') }, u.banned ? 'Unban' : 'Ban'))))))));
 }

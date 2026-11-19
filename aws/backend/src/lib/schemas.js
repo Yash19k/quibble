@@ -35,20 +35,30 @@ export const triviaImportSchema = z.object({
   difficulty: z.enum(['', 'easy', 'medium', 'hard']).optional().default(''),
 });
 
+const gameCode = z.string().trim().length(6).transform((c) => c.toUpperCase());
+const hello = z.object({ protocol: z.number().int().optional() });
+
 export const wsSchemas = {
-  hello: z.object({}).optional(),
+  hello,
+  sync: hello, // the client's watchdog: same as hello, sent when a phase change seems to have been missed
   ping: z.object({}).optional(),
   'game:create': z.object({
     category: z.string().trim().min(1).max(40).optional(), // single category (older clients)
     categories: z.array(z.string().trim().min(1).max(40)).max(50).optional(), // empty or missing = all
     count: z.number().int().min(1).max(30).default(10),
     hostPlays: z.boolean().default(false),
+    // One id per "Create game" click, reused for its resends, so a resend can never create a second game.
+    requestId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(),
   }),
-  'room:join': z.object({ code: z.string().trim().length(6) }),
+  'room:join': z.object({ code: gameCode }),
   'game:start': z.object({}).optional(),
   'game:cancel': z.object({}).optional(),
   'room:leave': z.object({}).optional(),
-  'answer:submit': z.object({ choice: z.number().int().min(0).max(3) }),
+  'answer:submit': z.object({
+    choice: z.number().int().min(0).max(3),
+    index: z.number().int().min(0).max(29).optional(), // which question this answers (protocol 2)
+    code: gameCode.optional(),
+  }),
 };
 
 /** Parse or throw a readable "field: message" error. */

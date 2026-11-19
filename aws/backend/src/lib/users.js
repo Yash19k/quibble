@@ -6,43 +6,67 @@
 // we get UNIQUE(email) and UNIQUE(username) in DynamoDB.
 import crypto from 'node:crypto';
 import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { ddb, scanAll, isConditionFailed, nowIso } from './db.js';
+import { ddb, scanAll, isConditionFailed, nowIso, sleep } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
 
-const userKey = (id) => ({ pk: `USER#${id}` });
+export const userKey = (id) => ({ pk: `USER#${id}` });
 const emailKey = (email) => ({ pk: `EMAIL#${email.trim().toLowerCase()}` });
 const unameKey = (username) => ({ pk: `UNAME#${username.trim().toLowerCase()}` });
 
 export const publicUser = (u) => ({ id: u.id, email: u.email, username: u.username, role: u.role });
 
+const reasonCode = (err, i) => err?.CancellationReasons?.[i]?.Code;
+
+/**
+ * Registers a user. Uniqueness of email and username comes from guard items written in the same transaction.
+ * A taken email/username -> 409 with `extra.field`. Throttling / transaction conflicts (e.g. a double-submitted form
+ * whose first attempt is still running) are retried here; if they persist -> 503 so the client retries later.
+ */
 export async function createUser({ email, username, passwordHash, role = 'player' }) {
-  const id = crypto.randomUUID();
-  const user = { ...userKey(id), type: 'user', id, email, username, passwordHash, role, banned: false, createdAt: nowIso() };
-  try {
-    await ddb.send(new TransactWriteCommand({
-      TransactItems: [
-        { Put: { TableName: env.usersTable, Item: { ...emailKey(email), type: 'guard', userId: id }, ConditionExpression: 'attribute_not_exists(pk)' } },
-        { Put: { TableName: env.usersTable, Item: { ...unameKey(username), type: 'guard', userId: id }, ConditionExpression: 'attribute_not_exists(pk)' } },
-        { Put: { TableName: env.usersTable, Item: user, ConditionExpression: 'attribute_not_exists(pk)' } },
-      ],
-    }));
-  } catch (err) {
-    if (isConditionFailed(err)) throw new HttpError(409, 'Email or username is already taken');
-    throw err;
+  for (let attempt = 0; ; attempt++) {
+    const id = crypto.randomUUID();
+    const user = { ...userKey(id), type: 'user', id, email, username, passwordHash, role, banned: false, createdAt: nowIso() };
+    try {
+      await ddb.send(new TransactWriteCommand({
+        TransactItems: [
+          { Put: { TableName: env.usersTable, Item: { ...emailKey(email), type: 'guard', userId: id }, ConditionExpression: 'attribute_not_exists(pk)' } },
+          { Put: { TableName: env.usersTable, Item: { ...unameKey(username), type: 'guard', userId: id }, ConditionExpression: 'attribute_not_exists(pk)' } },
+          { Put: { TableName: env.usersTable, Item: user, ConditionExpression: 'attribute_not_exists(pk)' } },
+        ],
+      }));
+      return user;
+    } catch (err) {
+      if (reasonCode(err, 0) === 'ConditionalCheckFailed') {
+        throw new HttpError(409, 'That email is already registered', { field: 'email' });
+      }
+      if (reasonCode(err, 1) === 'ConditionalCheckFailed') {
+        throw new HttpError(409, 'That username is taken', { field: 'username' });
+      }
+      const retryable =
+        reasonCode(err, 2) === 'ConditionalCheckFailed' || // astronomically unlikely id clash: new id
+        err?.name === 'TransactionCanceledException' || // TransactionConflict / ThrottlingError
+        err?.name === 'TransactionConflictException' ||
+        err?.name === 'ThrottlingException' ||
+        err?.name === 'ProvisionedThroughputExceededException' ||
+        err?.name === 'RequestLimitExceeded';
+      if (!retryable) throw err;
+      if (attempt >= 3) throw new HttpError(503, 'Server busy, please try again.');
+      await sleep(100 * 3 ** attempt + Math.random() * 100);
+    }
   }
-  return user;
 }
 
-export async function getUserById(id) {
+/** `consistent: true` right after a write (e.g. the socket opened just after sign-up) or when acting on the result. */
+export async function getUserById(id, { consistent = false } = {}) {
   if (!id) return null;
-  const res = await ddb.send(new GetCommand({ TableName: env.usersTable, Key: userKey(id) }));
+  const res = await ddb.send(new GetCommand({ TableName: env.usersTable, Key: userKey(id), ConsistentRead: consistent }));
   return res.Item || null;
 }
 
-export async function getUserByEmail(email) {
-  const guard = await ddb.send(new GetCommand({ TableName: env.usersTable, Key: emailKey(email) }));
-  return guard.Item ? getUserById(guard.Item.userId) : null;
+export async function getUserByEmail(email, { consistent = false } = {}) {
+  const guard = await ddb.send(new GetCommand({ TableName: env.usersTable, Key: emailKey(email), ConsistentRead: consistent }));
+  return guard.Item ? getUserById(guard.Item.userId, { consistent }) : null;
 }
 
 export async function listUsers() {

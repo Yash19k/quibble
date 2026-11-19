@@ -7,8 +7,11 @@
   "scripts": {
     "postinstall": "npm --prefix aws/backend install --no-audit --no-fund",
     "dev": "node aws/local/dev-server.mjs",
-    "test": "node --test aws/tests/scoring.test.mjs",
+    "test": "node --test \"aws/tests/*.unit.test.mjs\" aws/tests/scoring.test.mjs",
     "test:e2e": "node --test aws/tests/game.e2e.test.mjs",
+    "test:load": "node aws/tests/load.mjs",
+    "preflight": "node aws/scripts/preflight.mjs",
+    "quota:lambda": "node aws/scripts/quota.mjs",
     "deploy": "node aws/scripts/deploy.mjs",
     "publish": "node aws/scripts/publish-frontend.mjs",
     "seed": "node aws/scripts/seed.mjs"
@@ -20,7 +23,10 @@
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.1170.0",
     "@aws-sdk/client-dynamodb": "^3.1170.0",
+    "@aws-sdk/client-lambda": "^3.1172.0",
     "@aws-sdk/client-s3": "^3.1170.0",
+    "@aws-sdk/client-service-quotas": "^3.1172.0",
+    "@aws-sdk/client-sts": "^3.1172.0",
     "bcryptjs": "^3.0.3",
     "dotenv": "^18.0.9",
     "ws": "^8.23.0"

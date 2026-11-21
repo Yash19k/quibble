@@ -39,7 +39,9 @@ export const handler = async (event) => {
   const id = msg?.id;
   const ack = (payload) => sendTo(connectionId, { type: 'ack', id, ...payload });
 
-  const action = actions[msg?.event];
+  // Own properties only: "constructor", "__proto__", "toString"... must not resolve to Object.prototype members.
+  const name = typeof msg?.event === 'string' ? msg.event : '';
+  const action = Object.hasOwn(actions, name) && Object.hasOwn(wsSchemas, name) ? actions[name] : null;
   if (!action) {
     await ack({ ok: false, error: 'Unknown action.' });
     return { statusCode: 200 };

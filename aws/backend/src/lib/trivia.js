@@ -1,5 +1,6 @@
 // Utility to fetch questions from Open Trivia DB (OpenTDB)
 // API documentation: https://opentdb.com/api_config.php
+import { questionSchema } from './schemas.js';
 
 export const OPENTDB_CATEGORIES = {
   'General Knowledge': 9,
@@ -34,18 +35,15 @@ export function mapToAppCategory(openTdbCatName) {
   return 'General Knowledge';
 }
 
-function decodeHtmlEntities(str) {
-  if (!str) return '';
-  return str
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&eacute;/g, 'é')
-    .replace(/&ouml;/g, 'ö')
-    .replace(/&ntilde;/g, 'ñ')
-    .replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec));
+// Asked for RFC 3986 encoding (encode=url3986), so every field decodes exactly once with decodeURIComponent.
+// (The default HTML-entity encoding needs a full entity table, and decoding &amp; first double-decodes "&amp;lt;".)
+function decodeField(str) {
+  if (typeof str !== 'string') return '';
+  try {
+    return decodeURIComponent(str).trim();
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -60,6 +58,7 @@ export async function fetchTriviaQuestions({ amount = 10, category = '', difficu
   const url = new URL('https://opentdb.com/api.php');
   url.searchParams.set('amount', Math.min(Math.max(Number(amount) || 10, 1), 50));
   url.searchParams.set('type', 'multiple');
+  url.searchParams.set('encode', 'url3986');
   if (category) url.searchParams.set('category', category);
   if (difficulty) url.searchParams.set('difficulty', difficulty);
 
@@ -75,22 +74,24 @@ export async function fetchTriviaQuestions({ amount = 10, category = '', difficu
     throw new Error(`OpenTDB returned code ${data.response_code}`);
   }
 
-  return data.results.map((item) => {
-    const text = decodeHtmlEntities(item.question);
-    const correct = decodeHtmlEntities(item.correct_answer);
-    const incorrect = item.incorrect_answers.map(decodeHtmlEntities);
+  // Imported questions go through the same rules as ones typed in the admin panel; anything that breaks them is skipped.
+  return data.results.flatMap((item) => {
+    const text = decodeField(item.question);
+    const correct = decodeField(item.correct_answer);
+    const incorrect = (Array.isArray(item.incorrect_answers) ? item.incorrect_answers : []).map(decodeField).slice(0, 3);
 
-    // Shuffle options so correct answer is at a random index 0-3
+    // Shuffle options so the correct answer lands at a random index
     const allOptions = [...incorrect];
-    const correctIndex = Math.floor(Math.random() * 4);
+    const correctIndex = Math.floor(Math.random() * (incorrect.length + 1));
     allOptions.splice(correctIndex, 0, correct);
 
-    return {
+    const parsed = questionSchema.safeParse({
       text,
       options: allOptions,
       correctIndex,
-      category: mapToAppCategory(item.category),
+      category: mapToAppCategory(decodeField(item.category)),
       timeLimit: 20,
-    };
+    });
+    return parsed.success ? [parsed.data] : [];
   });
 }

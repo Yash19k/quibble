@@ -550,7 +550,7 @@ function renderAuth(mode = 'login') {
     title: '3-20 letters, numbers or underscores', 'aria-describedby': 'auth-username-err',
   });
   const usernameErr = el('div', { class: 'error', id: 'auth-username-err', role: 'alert' });
-  const password = el('input', { id: 'auth-password', type: 'password', autocomplete: register ? 'new-password' : 'current-password', minlength: register ? 8 : 1, maxlength: 100, required: true });
+  const password = el('input', { id: 'auth-password', type: 'password', autocomplete: register ? 'new-password' : 'current-password', minlength: register ? 8 : 1, maxlength: register ? 72 : 100, required: true });
   const EYE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
   const EYE_OFF = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.7 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M2 2l20 20"/></svg>';
   const toggle = el('button', {
@@ -1048,13 +1048,27 @@ function startCountdown(endsAt, totalMs, bar, label, onDone) {
   tick = setInterval(update, 100);
 }
 
+/** Only same-site paths ("/flags/fr.svg") or https: images; anything else (javascript:, data:, //host) is dropped. */
+function safeImageUrl(raw) {
+  const src = String(raw || '').trim();
+  if (/^\/(?!\/)/.test(src)) return src;
+  try {
+    const url = new URL(src);
+    return url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderQuestionContent(rawText) {
   const match = rawText.match(/\[image:([^\]]+)\]/);
+  const src = match ? safeImageUrl(match[1]) : null;
   if (!match) return el('div', { class: 'qtext', tabindex: '-1' }, rawText);
+  if (!src) return el('div', { class: 'qtext', tabindex: '-1' }, rawText.replace(/\[image:[^\]]+\]/, '').trim());
   const cleanText = rawText.replace(/\[image:[^\]]+\]/, '').trim();
   return el('div', { class: 'qcontent', tabindex: '-1' },
     cleanText ? el('div', { class: 'qtext' }, cleanText) : null,
-    el('div', { class: 'qimage-wrap' }, el('img', { src: match[1], alt: 'Question image', class: 'qimage' })));
+    el('div', { class: 'qimage-wrap' }, el('img', { src, referrerpolicy: 'no-referrer', alt: 'Question image', class: 'qimage' })));
 }
 
 const answerKey = (code, index) => `${code}:${index}`;

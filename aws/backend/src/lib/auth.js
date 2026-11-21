@@ -7,14 +7,17 @@ import { env } from './config.js';
 import { getUserById, publicUser } from './users.js';
 import { HttpError } from './errors.js';
 
-export const signToken = (userId) => jwt.sign({ sub: userId }, env.jwtSecret, { expiresIn: '7d' });
+// The algorithm is pinned on both sides so a token can never pick its own (e.g. "none" or an RS/HS confusion).
+const ALGORITHM = 'HS256';
+
+export const signToken = (userId) => jwt.sign({ sub: userId }, env.jwtSecret, { expiresIn: '7d', algorithm: ALGORITHM });
 
 /** { userId, iat (seconds) } for a valid token, else null. Does not touch the database. */
 export function verifyToken(token) {
   if (!token) return null;
   try {
-    const payload = jwt.verify(token, env.jwtSecret);
-    return payload?.sub ? { userId: payload.sub, iat: payload.iat } : null;
+    const payload = jwt.verify(token, env.jwtSecret, { algorithms: [ALGORITHM] });
+    return typeof payload?.sub === 'string' && payload.sub ? { userId: payload.sub, iat: payload.iat } : null;
   } catch {
     return null;
   }

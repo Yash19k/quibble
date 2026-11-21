@@ -130,17 +130,23 @@ export async function countRoster(code) {
 }
 
 // A game's questions never change, so each container keeps the few games it serves (read once, strongly).
-const questionCache = new Map();
+// Entries expire: codes are random and can be reused once an old game's items are gone (TTL), and a long-lived container
+// must never serve a previous game's questions under the same code.
+const questionCache = new Map(); // code -> { questions, at }
 const QUESTION_CACHE_SIZE = 100;
+const QUESTION_CACHE_MS = 6 * 60 * 60 * 1000; // longer than any lobby (3 h) plus a full game
 
 export function rememberQuestions(code, questions) {
+  questionCache.delete(code); // re-insert at the end: the oldest entry is evicted first
   if (questionCache.size >= QUESTION_CACHE_SIZE) questionCache.delete(questionCache.keys().next().value);
-  questionCache.set(code, questions);
+  questionCache.set(code, { questions, at: Date.now() });
 }
 
 export async function getQuestions(code) {
-  if (questionCache.has(code)) return questionCache.get(code);
+  const hit = questionCache.get(code);
+  if (hit && Date.now() - hit.at < QUESTION_CACHE_MS) return hit.questions;
   const item = await play(keys.meta(code), true);
   if (item?.questions) rememberQuestions(code, item.questions);
+  else questionCache.delete(code);
   return item?.questions ?? null;
 }

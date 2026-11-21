@@ -4,7 +4,12 @@ import { z } from 'zod';
 export const registerSchema = z.object({
   email: z.string().trim().email('must be a valid email').max(120),
   username: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/, 'must be 3-20 letters, numbers or underscores'),
-  password: z.string().min(8, 'must be at least 8 characters').max(100),
+  // bcrypt only uses the first 72 BYTES: longer passwords would silently match anything sharing that prefix.
+  password: z
+    .string()
+    .min(8, 'must be at least 8 characters')
+    .max(72, 'must be at most 72 characters')
+    .refine((p) => Buffer.byteLength(p, 'utf8') <= 72, 'is too long (use fewer special characters)'),
 });
 
 export const loginSchema = z.object({

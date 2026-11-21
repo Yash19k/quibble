@@ -105,6 +105,32 @@ export function el(tag, attrs = {}, ...children) {
 
 export function clear(node) { node.replaceChildren(); return node; }
 
+let dialogSeq = 0;
+/**
+ * A themed confirmation popup instead of the browser's confirm(). Resolves true when confirmed; Escape, the Cancel
+ * button or a click outside resolve false. `danger` paints the confirm button red and focuses Cancel first.
+ */
+export function confirmDialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const id = `dlg${++dialogSeq}`;
+    const cancel = el('button', { type: 'button', class: 'ghost', onclick: () => dlg.close('cancel') }, cancelLabel);
+    const ok = el('button', { type: 'button', class: danger ? 'danger' : '', onclick: () => dlg.close('ok') }, confirmLabel);
+    const dlg = el('dialog', { class: 'modal', 'aria-labelledby': `${id}-t`, 'aria-describedby': message ? `${id}-m` : null },
+      el('h3', { id: `${id}-t` }, title),
+      message ? el('p', { id: `${id}-m`, class: 'muted' }, message) : null,
+      el('div', { class: 'modal-actions' }, cancel, ok));
+    // A click on the backdrop lands on the <dialog> itself (its content is inside a padded box).
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
+    dlg.addEventListener('close', () => {
+      resolve(dlg.returnValue === 'ok');
+      dlg.remove();
+    }, { once: true });
+    document.body.append(dlg);
+    dlg.showModal();
+    (danger ? cancel : ok).focus();
+  });
+}
+
 let toastTimer;
 export function toast(msg) {
   const t = document.getElementById('toast');

@@ -3,6 +3,7 @@
 //   ed.node    the form (append it anywhere)
 //   ed.read()  the question as the API wants it; throws Error(message) when something is missing
 import { el } from './common.js';
+import { icon } from './icons.js';
 
 export const TYPE_LABELS = {
   choice: 'Multiple choice',
@@ -11,7 +12,8 @@ export const TYPE_LABELS = {
   order: 'Put in order',
   number: 'Closest number',
 };
-export const TYPE_ICONS = { choice: '🔘', truefalse: '⚖️', type: '⌨️', order: '🔢', number: '🎯' };
+/** Icon names (icons.js) for each type. */
+export const TYPE_ICONS = { choice: 'choice', truefalse: 'truefalse', type: 'type', order: 'order', number: 'number' };
 export const TYPE_HINTS = {
   choice: 'Players tap one of 2-4 answers.',
   truefalse: 'Players tap True or False. Quick and punchy.',
@@ -60,8 +62,8 @@ export function questionEditor(existing = null, { withCategory = true } = {}) {
   const tfPanel = el('div', {},
     el('label', {}, 'The statement is…'),
     el('div', { class: 'row' },
-      el('label', { class: 'check-row' }, tfTrue, el('span', {}, '✅ True')),
-      el('label', { class: 'check-row' }, tfFalse, el('span', {}, '❌ False'))));
+      el('label', { class: 'check-row' }, tfTrue, el('span', {}, 'True')),
+      el('label', { class: 'check-row' }, tfFalse, el('span', {}, 'False'))));
 
   // --- type it ---
   const accepted = [0, 1, 2, 3, 4].map((i) => el('input', {
@@ -91,7 +93,7 @@ export function questionEditor(existing = null, { withCategory = true } = {}) {
   const panels = { choice: choicePanel, truefalse: tfPanel, type: typePanel, order: orderPanel, number: numberPanel };
   const typeButtons = Object.entries(TYPE_LABELS).map(([t, label]) => el('button', {
     type: 'button', class: 'cat-box type-box', 'data-type': t, onclick: () => setType(t),
-  }, `${TYPE_ICONS[t]} ${label}`));
+  }, icon(TYPE_ICONS[t], { size: 16 }), label));
 
   function setType(t) {
     type = t;

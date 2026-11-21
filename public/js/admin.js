@@ -1,4 +1,5 @@
-import { api, el, clear, toast, withPending } from './common.js';
+import { api, el, clear, toast, withPending, confirmDialog } from './common.js';
+import { icon } from './icons.js';
 import { questionEditor, answerSummary, TYPE_LABELS, TYPE_ICONS } from './qeditor.js';
 
 const app = document.getElementById('app');
@@ -89,25 +90,27 @@ async function questionsTab(body, search = '') {
   clear(body).append(
     el('div', { class: 'row', style: 'margin-bottom:12px' },
       el('div', { class: 'grow' }, q),
-      el('button', { class: 'ghost', onclick: () => importTriviaModal(body) }, '🌐 Import from Web'),
-      el('button', { onclick: () => questionForm(body, null) }, 'New question')),
+      el('button', { class: 'ghost with-icon', onclick: () => importTriviaModal(body) }, icon('globe'), 'Import from the web'),
+      el('button', { class: 'with-icon', onclick: () => questionForm(body, null) }, icon('plus'), 'New question')),
     el('div', { class: 'card table-wrap' }, questions.length
       ? el('table', {},
           el('thead', {}, el('tr', {}, ['Question', 'Type', 'Category', 'Answer', ''].map((h) => el('th', {}, h)))),
           el('tbody', {}, questions.map((x) => el('tr', {},
             el('td', {}, x.text),
-            el('td', { title: TYPE_LABELS[x.type || 'choice'] }, TYPE_ICONS[x.type || 'choice']),
+            el('td', { class: 'type-cell', title: TYPE_LABELS[x.type || 'choice'] }, icon(TYPE_ICONS[x.type || 'choice']), el('span', { class: 'sr-only' }, TYPE_LABELS[x.type || 'choice'])),
             el('td', {}, el('span', { class: 'pill' }, x.category)),
             el('td', {}, answerSummary(x)),
             el('td', { class: 'num', style: 'white-space:nowrap' },
               el('button', { class: 'ghost small', onclick: () => questionForm(body, x) }, 'Edit'), ' ',
               el('button', { class: 'danger small', onclick: async (e) => {
-                if (!confirm('Delete this question?')) return;
+                const button = e.currentTarget;
+                const ok = await confirmDialog({ title: 'Delete this question?', message: x.text, confirmLabel: 'Delete', danger: true });
+                if (!ok) return;
                 await action('Deleting…', async () => {
                   await api(`/api/admin/questions/${x.id}`, { method: 'DELETE' });
                   toast('Deleted');
                   questionsTab(body, search);
-                })(e);
+                })({ currentTarget: button });
               } }, 'Delete'))))))
       : el('p', { class: 'muted' }, 'No questions found.')));
 }
@@ -184,7 +187,7 @@ async function importTriviaModal(body) {
   }, 'Import Now');
 
   clear(body).append(el('div', { class: 'card narrow' },
-    el('h3', {}, '🌐 Import Questions from Web'),
+    el('h3', { class: 'with-icon' }, icon('globe', { size: 22 }), 'Import questions from the web'),
     el('p', { class: 'muted' }, 'Fetch multiple-choice trivia instantly from the Open Trivia Database (OpenTDB).'),
     el('label', {}, 'Category'), catSelect,
     el('label', {}, 'Number of questions (1 - 50)'), countInput,

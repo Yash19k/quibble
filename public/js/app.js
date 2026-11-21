@@ -2,7 +2,9 @@ import {
   api, el, clear, toast, medal, rankCell, sleep, WS_URL, session, setNotice, withPending, copyText,
   getToken, setToken, getProfile, setProfile, getLastEmail, setLastEmail,
   randomId, decodeJwt, tokenExpired, parseJoinCode, joinUrl, splitBoard, lobbyView, isStale, isFinalAnswerError,
+  confirmDialog,
 } from './common.js';
+import { icon, shape } from './icons.js';
 import { Realtime } from './realtime.js';
 import { drawQr } from './qr.js';
 import { questionEditor, TYPE_LABELS, TYPE_ICONS } from './qeditor.js';
@@ -52,7 +54,7 @@ let quizLink = (() => {
 })();
 let linkedQuiz = null; // its summary, once looked up
 // The host form's choices, kept while the page is open.
-const hostPrefs = { source: 'bank', quizId: null, types: new Set(), doublePoints: true, bigScreen: false, hostPlays: true, shuffle: false };
+const hostPrefs = { source: 'bank', quizId: null, types: new Set(), count: 10, doublePoints: true, bigScreen: false, hostPlays: true, shuffle: false };
 
 async function send(event, data = {}) {
   const s = socket;
@@ -108,7 +110,9 @@ function forgetSession() {
 }
 
 async function logout({ expired = false } = {}) {
-  if (!expired && isLive() && !confirm("You're in a game. Log out anyway?")) return;
+  if (!expired && isLive() && !(await confirmDialog({
+    title: 'Log out?', message: "You're in a game. Logging out takes you out of it on this device.", confirmLabel: 'Log out', danger: true,
+  }))) return;
   if (!expired) api('/api/auth/logout', { method: 'POST', budgetMs: 3000 }).catch(() => {});
   forgetSession();
   socket?.close();
@@ -713,6 +717,16 @@ async function resolveQuizLink() {
   }
 }
 
+/** A settings row with an on/off switch: icon, title, one line of help. */
+function settingRow(input, iconName, title, help) {
+  input.classList.add('switch');
+  input.setAttribute('role', 'switch');
+  return el('label', { class: 'setting' },
+    el('span', { class: 'setting-icon' }, icon(iconName)),
+    el('span', { class: 'setting-text' }, el('b', {}, title), help ? el('small', {}, help) : null),
+    input);
+}
+
 function playTab(body) {
   if (quizLink) {
     clear(body).append(el('p', { class: 'muted' }, 'Opening the shared quiz…'));
@@ -722,42 +736,71 @@ function playTab(body) {
   const selectedCats = new Set(); // empty = all categories
   let catCounts = new Map();
   let typeInfo = [];
-  const catGrid = el('div', { class: 'cat-grid', role: 'group', 'aria-label': 'Categories' }, el('p', { class: 'muted' }, 'Loading categories…'));
-  const catHint = el('p', { class: 'muted cat-hint' });
-  const typeGrid = el('div', { class: 'cat-grid', role: 'group', 'aria-label': 'Question types' });
-  const typeHint = el('p', { class: 'muted cat-hint' });
-  const count = el('input', { id: 'q-count', type: 'number', min: 1, max: 30, value: 10 });
-  const hostPlays = el('input', { type: 'checkbox', id: 'host-plays', checked: hostPrefs.hostPlays && !hostPrefs.bigScreen, disabled: hostPrefs.bigScreen });
-  const bigScreen = el('input', { type: 'checkbox', id: 'big-screen', checked: hostPrefs.bigScreen });
-  const doublePts = el('input', { type: 'checkbox', id: 'double-pts', checked: hostPrefs.doublePoints });
-  const shuffle = el('input', { type: 'checkbox', id: 'quiz-shuffle', checked: hostPrefs.shuffle });
+  let questionCount = hostPrefs.count;
+  const catGrid = el('div', { class: 'chip-grid', role: 'group', 'aria-label': 'Categories' }, el('p', { class: 'muted' }, 'Loading categories…'));
+  const catHint = el('p', { class: 'field-hint' });
+  const typeGrid = el('div', { class: 'chip-grid', role: 'group', 'aria-label': 'Question types' });
+  const typeHint = el('p', { class: 'field-hint' });
+  const countOut = el('output', { class: 'stepper-value', 'aria-live': 'polite' });
+  const hostPlays = el('input', { type: 'checkbox', checked: hostPrefs.hostPlays && !hostPrefs.bigScreen, disabled: hostPrefs.bigScreen });
+  const bigScreen = el('input', { type: 'checkbox', checked: hostPrefs.bigScreen });
+  const doublePts = el('input', { type: 'checkbox', checked: hostPrefs.doublePoints });
+  const shuffle = el('input', { type: 'checkbox', checked: hostPrefs.shuffle });
   const quizSelect = el('select', { id: 'quiz-pick' });
-  const quizInfo = el('p', { class: 'muted cat-hint' });
+  const quizInfo = el('p', { class: 'field-hint' });
+  const summary = el('p', { class: 'host-summary', role: 'status' });
   const createErr = el('div', { class: 'error', role: 'alert' });
   const failed = joinFailure;
   joinFailure = null;
   const code = el('input', {
     id: 'join-code', maxlength: 6, placeholder: 'ABC123', autocapitalize: 'characters', autocomplete: 'off', spellcheck: 'false',
-    class: 'code-input', value: failed?.code || '', 'aria-describedby': 'join-err',
+    class: 'code-input', value: failed?.code || '', 'aria-label': 'Game code', 'aria-describedby': 'join-err',
   });
   const joinErr = el('div', { class: 'error', id: 'join-err', role: 'alert' }, failed?.error || '');
 
-  hostPlays.addEventListener('change', () => { hostPrefs.hostPlays = hostPlays.checked; });
+  const paintSummary = () => {
+    const extras = [doublePts.checked ? 'double points' : null, bigScreen.checked ? 'big screen' : hostPlays.checked ? 'you play too' : 'you present'].filter(Boolean);
+    let what;
+    if (hostPrefs.source === 'quiz') {
+      const opt = quizSelect.selectedOptions[0];
+      what = hostPrefs.quizId && opt ? opt.textContent : 'No quiz picked yet';
+    } else {
+      const cats = selectedCats.size ? `${selectedCats.size} categor${selectedCats.size === 1 ? 'y' : 'ies'}` : 'all categories';
+      const types = hostPrefs.types.size ? `${hostPrefs.types.size} question types` : 'every question type';
+      what = `${questionCount} questions · ${cats} · ${types}`;
+    }
+    summary.replaceChildren(el('b', {}, what), el('span', {}, extras.join(' · ')));
+  };
+
+  hostPlays.addEventListener('change', () => { hostPrefs.hostPlays = hostPlays.checked; paintSummary(); });
   bigScreen.addEventListener('change', () => {
     hostPrefs.bigScreen = bigScreen.checked;
     hostPlays.disabled = bigScreen.checked;
     hostPlays.checked = !bigScreen.checked && hostPrefs.hostPlays;
+    paintSummary();
   });
-  doublePts.addEventListener('change', () => { hostPrefs.doublePoints = doublePts.checked; });
+  doublePts.addEventListener('change', () => { hostPrefs.doublePoints = doublePts.checked; paintSummary(); });
   shuffle.addEventListener('change', () => { hostPrefs.shuffle = shuffle.checked; });
-  quizSelect.addEventListener('change', () => { hostPrefs.quizId = quizSelect.value || null; });
+  quizSelect.addEventListener('change', () => { hostPrefs.quizId = quizSelect.value || null; paintSummary(); });
 
-  // "All" clears the selection; any other box toggles in or out (pick as many as you like).
+  // Number of questions: a stepper, 1-30.
+  const setCount = (n) => {
+    questionCount = Math.min(30, Math.max(1, n));
+    hostPrefs.count = questionCount;
+    countOut.textContent = String(questionCount);
+    minus.disabled = questionCount <= 1;
+    plus.disabled = questionCount >= 30;
+    paintSummary();
+  };
+  const minus = el('button', { type: 'button', class: 'ghost icon-btn', 'aria-label': 'Fewer questions', onclick: () => setCount(questionCount - (questionCount > 5 ? 5 : 1)) }, icon('minus'));
+  const plus = el('button', { type: 'button', class: 'ghost icon-btn', 'aria-label': 'More questions', onclick: () => setCount(questionCount + (questionCount >= 5 ? 5 : 1)) }, icon('plus'));
+
+  // "All" clears the selection; any other chip toggles in or out (pick as many as you like).
   function toggleCat(value) {
     if (!value) selectedCats.clear();
     else if (selectedCats.has(value)) selectedCats.delete(value);
     else selectedCats.add(value);
-    catGrid.querySelectorAll('.cat-box').forEach((b) => {
+    catGrid.querySelectorAll('.chip').forEach((b) => {
       const on = b.dataset.cat ? selectedCats.has(b.dataset.cat) : selectedCats.size === 0;
       b.classList.toggle('active', on);
       b.setAttribute('aria-pressed', String(on));
@@ -765,9 +808,7 @@ function playTab(body) {
     const pool = selectedCats.size
       ? [...selectedCats].reduce((s, c) => s + (catCounts.get(c) || 0), 0)
       : [...catCounts.values()].reduce((s, n) => s + n, 0);
-    catHint.textContent = selectedCats.size
-      ? `${selectedCats.size} selected · ${pool} questions available`
-      : `All categories · ${pool} questions available`;
+    catHint.textContent = `${selectedCats.size ? `${selectedCats.size} selected` : 'All categories'} · ${pool} questions`;
     paintTypes();
   }
 
@@ -778,35 +819,36 @@ function playTab(body) {
     return selectedCats.size ? [...selectedCats].reduce((s, c) => s + (info.byCategory?.[c] || 0), 0) : info.count;
   };
   function toggleType(t) {
-    const all = TYPE_ORDER;
-    if (!hostPrefs.types.size) hostPrefs.types = new Set(all.filter((x) => x !== t));
+    if (!hostPrefs.types.size) hostPrefs.types = new Set(TYPE_ORDER.filter((x) => x !== t));
     else if (hostPrefs.types.has(t)) {
       if (hostPrefs.types.size === 1) return toast('Keep at least one question type.');
       hostPrefs.types.delete(t);
     } else {
       hostPrefs.types.add(t);
-      if (hostPrefs.types.size === all.length) hostPrefs.types.clear();
+      if (hostPrefs.types.size === TYPE_ORDER.length) hostPrefs.types.clear();
     }
     paintTypes();
   }
   function paintTypes() {
     const on = (t) => !hostPrefs.types.size || hostPrefs.types.has(t);
     clear(typeGrid).append(...TYPE_ORDER.map((t) => el('button', {
-      type: 'button', class: `cat-box${on(t) ? ' active' : ''}`, 'aria-pressed': String(on(t)), onclick: () => toggleType(t),
-    }, `${TYPE_ICONS[t]} ${TYPE_LABELS[t]}`, el('span', { class: 'cat-count' }, `(${typeCount(t)})`))));
+      type: 'button', class: `chip${on(t) ? ' active' : ''}`, 'aria-pressed': String(on(t)), onclick: () => toggleType(t),
+    }, icon(TYPE_ICONS[t], { size: 16 }), TYPE_LABELS[t], el('span', { class: 'chip-count' }, typeCount(t)))));
     const matching = TYPE_ORDER.filter(on).reduce((s, t) => s + typeCount(t), 0);
     typeHint.textContent = `${hostPrefs.types.size ? `${hostPrefs.types.size} of ${TYPE_ORDER.length} types` : 'Every type'} · ${matching} matching questions`;
+    paintSummary();
   }
 
-  const sourceBtns = [['bank', '🎲 Question bank'], ['quiz', '📝 A quiz']].map(([id, label]) =>
-    el('button', { type: 'button', 'data-src': id, onclick: () => setSource(id) }, label));
-  const bankPanel = el('div', {},
-    el('label', {}, 'Categories (pick one or more)'), catGrid, catHint,
-    el('label', {}, 'Question types'), typeGrid, typeHint,
-    el('label', { for: 'q-count' }, 'Number of questions'), count);
-  const quizPanel = el('div', {},
-    el('label', { for: 'quiz-pick' }, 'Quiz'), quizSelect, quizInfo,
-    el('label', { class: 'check-row' }, shuffle, el('span', {}, 'Shuffle the questions')));
+  const sourceBtns = [['bank', 'shuffle', 'Question bank'], ['quiz', 'file', 'One of my quizzes']].map(([id, ic, label]) =>
+    el('button', { type: 'button', 'data-src': id, onclick: () => setSource(id) }, icon(ic, { size: 16 }), label));
+  const bankPanel = el('div', { class: 'host-fields' },
+    el('div', { class: 'field' }, el('span', { class: 'field-label' }, 'Categories'), catGrid, catHint),
+    el('div', { class: 'field' }, el('span', { class: 'field-label' }, 'Question types'), typeGrid, typeHint),
+    el('div', { class: 'field' }, el('span', { class: 'field-label', id: 'count-label' }, 'Number of questions'),
+      el('div', { class: 'stepper', role: 'group', 'aria-labelledby': 'count-label' }, minus, countOut, plus)));
+  const quizPanel = el('div', { class: 'host-fields' },
+    el('div', { class: 'field' }, el('label', { class: 'field-label', for: 'quiz-pick' }, 'Quiz'), quizSelect, quizInfo),
+    settingRow(shuffle, 'shuffle', 'Shuffle the questions', 'Otherwise they come in the order you wrote them'));
   function setSource(id) {
     hostPrefs.source = id;
     bankPanel.hidden = id !== 'bank';
@@ -816,6 +858,7 @@ function playTab(body) {
       b.setAttribute('aria-pressed', String(b.dataset.src === id));
     });
     if (id === 'quiz') loadQuizChoices();
+    paintSummary();
   }
   async function loadQuizChoices() {
     clear(quizSelect).append(el('option', { value: '' }, 'Loading…'));
@@ -832,7 +875,9 @@ function playTab(body) {
       el('option', { value: '' }, list.length ? 'Pick a quiz…' : 'No quizzes yet'),
       ...list.map((q) => el('option', { value: q.id }, `${q.title} · ${q.questionCount} question${q.questionCount === 1 ? '' : 's'}${q.ownerId !== me.id ? ` · by ${q.ownerName}` : ''}`)));
     quizSelect.value = hostPrefs.quizId || '';
-    quizInfo.textContent = list.length ? '' : 'Build one in the "My quizzes" tab, or open a quiz link someone shared.';
+    quizInfo.replaceChildren(list.length ? '' : el('span', {}, 'You have no quizzes yet. ',
+      el('a', { href: '#', onclick: (e) => { e.preventDefault(); homeTab = 'quizzes'; renderHome(); } }, 'Build one in My quizzes'), '.'));
+    paintSummary();
   }
 
   const createBtn = el('button', { class: 'block', onclick: () => {
@@ -841,55 +886,59 @@ function playTab(body) {
     if (hostPrefs.source === 'quiz') {
       if (!hostPrefs.quizId) {
         createErr.textContent = 'Pick a quiz first.';
+        quizSelect.focus();
         return;
       }
       createGame(createBtn, createErr, { ...common, quizId: hostPrefs.quizId, shuffle: shuffle.checked });
       return;
     }
-    createGame(createBtn, createErr, {
-      ...common,
-      categories: [...selectedCats],
-      types: [...hostPrefs.types],
-      count: Math.min(30, Math.max(1, Number(count.value) || 10)),
-    });
+    createGame(createBtn, createErr, { ...common, categories: [...selectedCats], types: [...hostPrefs.types], count: questionCount });
   } }, 'Create game');
-  const joinBtn = el('button', { class: 'block', type: 'submit' }, 'Join');
-  const joinForm = el('form', { class: 'card', onsubmit: (e) => { e.preventDefault(); joinGame(code.value, joinBtn, joinErr); } },
-    el('h3', {}, 'Join a game'),
-    el('p', { class: 'muted' }, 'Enter the 6-character code from the host, scan their QR code, or open their join link.'),
-    el('label', { for: 'join-code' }, 'Game code'), code,
-    joinErr,
-    joinBtn);
+
+  const joinBtn = el('button', { type: 'submit' }, 'Join');
+  const joinForm = el('form', { class: 'card join-card', onsubmit: (e) => { e.preventDefault(); joinGame(code.value, joinBtn, joinErr); } },
+    el('div', { class: 'join-copy' },
+      el('h3', {}, 'Join a game'),
+      el('p', { class: 'muted' }, 'Enter the code on the host’s screen, or scan their QR code.')),
+    el('div', { class: 'join-row' }, code, joinBtn),
+    joinErr);
 
   if (linkedQuiz && hostPrefs.quizId === linkedQuiz.id) {
     body.append(el('div', { class: 'banner info' }, `Shared quiz “${linkedQuiz.title}” by ${linkedQuiz.ownerName} is ready to host below.`));
   }
   body.append(
-    el('div', { class: 'grid2' },
-      el('div', { class: 'card' },
+    joinForm,
+    el('div', { class: 'card host-card' },
+      el('div', { class: 'host-head' },
         el('h3', {}, 'Host a game'),
-        el('p', { class: 'muted' }, 'Create a room with a 6-character code. Play along or host for others.'),
-        el('div', { class: 'tabs seg', role: 'group', 'aria-label': 'Where the questions come from' }, sourceBtns),
-        bankPanel,
-        quizPanel,
-        el('label', {}, 'Extras'),
-        el('label', { class: 'check-row' }, doublePts, el('span', {}, '⚡ Double-points rounds', el('small', {}, 'The final question and a few others score 2×'))),
-        el('label', { class: 'check-row' }, bigScreen, el('span', {}, '📺 Big-screen mode', el('small', {}, 'Show questions on a projector or TV; phones become answer pads'))),
-        el('label', { class: 'check-row' }, hostPlays, el('span', {}, 'Participate as a player')),
-        createErr,
-        createBtn),
-      joinForm));
+        el('p', { class: 'muted' }, 'Pick the questions, choose how to play, and share the code.')),
+      el('div', { class: 'host-grid' },
+        el('section', { class: 'host-col', 'aria-label': 'Questions' },
+          el('h4', { class: 'section-title' }, 'Questions'),
+          el('div', { class: 'tabs seg', role: 'group', 'aria-label': 'Where the questions come from' }, sourceBtns),
+          bankPanel,
+          quizPanel),
+        el('section', { class: 'host-col host-side', 'aria-label': 'Game settings' },
+          el('h4', { class: 'section-title' }, 'Game settings'),
+          settingRow(doublePts, 'zap', 'Double-points rounds', 'The final question and a few others score 2×'),
+          settingRow(bigScreen, 'monitor', 'Big-screen mode', 'Put the game on a projector or TV for the room'),
+          settingRow(hostPlays, 'user', 'Play along', 'Answer the questions yourself'),
+          summary,
+          createErr,
+          createBtn))));
+  setCount(questionCount);
   setSource(hostPrefs.source);
+  paintTypes();
   if (failed) code.focus();
 
   loadCategories().then(({ list: categories, types }) => {
     catCounts = new Map(categories.map((c) => [c.category, c.count]));
     typeInfo = types;
     clear(catGrid).append(
-      el('button', { type: 'button', class: 'cat-box', 'data-cat': '', onclick: () => toggleCat('') },
-        'All', el('span', { class: 'cat-count' }, `(${categories.reduce((s, c) => s + c.count, 0)})`)),
-      ...categories.map((c) => el('button', { type: 'button', class: 'cat-box', 'data-cat': c.category, onclick: () => toggleCat(c.category) },
-        c.category, el('span', { class: 'cat-count' }, `(${c.count})`))));
+      el('button', { type: 'button', class: 'chip', 'data-cat': '', onclick: () => toggleCat('') },
+        'All', el('span', { class: 'chip-count' }, categories.reduce((s, c) => s + c.count, 0))),
+      ...categories.map((c) => el('button', { type: 'button', class: 'chip', 'data-cat': c.category, onclick: () => toggleCat(c.category) },
+        c.category, el('span', { class: 'chip-count' }, c.count))));
     toggleCat(''); // start on "All"
     if (!categories.length) createErr.textContent = 'No questions yet. An admin needs to add some (or run npm run seed).';
   }).catch((err) => {
@@ -1011,7 +1060,7 @@ async function quizzesTab(body) {
   clear(body).append(
     el('div', { class: 'row', style: 'margin-bottom:16px' },
       el('p', { class: 'muted grow', style: 'margin:0' }, 'Build your own quiz with any question type. Host it, or share its link so friends can host it too.'),
-      el('button', { onclick: () => quizBuilder(body, null) }, '＋ New quiz')),
+      el('button', { class: 'with-icon', onclick: () => quizBuilder(body, null) }, icon('plus'), 'New quiz')),
     quizzes.length
       ? el('div', { class: 'quiz-list' }, quizzes.map((q) => quizCard(body, q)))
       : el('div', { class: 'card center' },
@@ -1021,7 +1070,7 @@ async function quizzesTab(body) {
 
 function quizCard(body, q) {
   const del = el('button', { class: 'ghost danger small', onclick: async () => {
-    if (!confirm(`Delete “${q.title}”? This can't be undone.`)) return;
+    if (!(await confirmDialog({ title: `Delete “${q.title}”?`, message: "This can't be undone. Shared links to it stop working.", confirmLabel: 'Delete quiz', danger: true }))) return;
     await withPending(del, 'Deleting…', async () => {
       try {
         await api(`/api/quizzes/${q.id}`, { method: 'DELETE' });
@@ -1035,18 +1084,19 @@ function quizCard(body, q) {
   return el('div', { class: 'card quiz-card' },
     el('div', { class: 'row' },
       el('h3', { class: 'grow', style: 'margin:0' }, q.title),
-      el('span', { class: 'pill' }, q.shared ? 'shared' : 'private')),
+      el('span', { class: `pill${q.shared ? ' shared' : ''}` }, q.shared ? 'shared' : 'private')),
     q.description ? el('p', { class: 'muted', style: 'margin:8px 0 0' }, q.description) : null,
     el('p', { class: 'hint' }, `${q.questionCount} question${q.questionCount === 1 ? '' : 's'} · edited ${String(q.updatedAt || '').slice(0, 10)}`),
-    el('div', { class: 'row', style: 'margin-top:14px' },
-      el('button', { onclick: () => { hostPrefs.source = 'quiz'; hostPrefs.quizId = q.id; homeTab = 'play'; renderHome(); } }, '▶ Host'),
-      el('button', { class: 'ghost', onclick: () => editQuiz(body, q.id) }, 'Edit'),
+    el('div', { class: 'row quiz-actions' },
+      el('button', { class: 'with-icon', onclick: () => { hostPrefs.source = 'quiz'; hostPrefs.quizId = q.id; homeTab = 'play'; renderHome(); } }, icon('play', { size: 16 }), 'Host'),
+      el('button', { class: 'ghost with-icon', onclick: () => editQuiz(body, q.id) }, icon('edit', { size: 16 }), 'Edit'),
       q.shared
-        ? el('button', { class: 'ghost', onclick: async () => {
+        ? el('button', { class: 'ghost with-icon', onclick: async () => {
             const link = quizUrl(q.id);
             toast((await copyText(link)) ? 'Share link copied' : link);
-          } }, '🔗 Copy link')
+          } }, icon('link', { size: 16 }), 'Copy link')
         : null,
+      el('span', { class: 'grow' }),
       del));
 }
 
@@ -1069,7 +1119,7 @@ function quizBuilder(body, quiz) {
   const list = el('div', { class: 'quiz-questions' });
   const error = el('div', { class: 'error', role: 'alert' });
   const entries = [];
-  const addBtn = el('button', { type: 'button', class: 'ghost block', onclick: () => add(null, true) }, '＋ Add a question');
+  const addBtn = el('button', { type: 'button', class: 'ghost block with-icon add-question', onclick: () => add(null, true) }, icon('plus'), 'Add a question');
 
   function move(entry, delta) {
     const i = entries.indexOf(entry);
@@ -1085,8 +1135,8 @@ function quizBuilder(body, quiz) {
     const entry = { ed, head, card: null };
     entry.card = el('div', { class: 'card qcard' },
       el('div', { class: 'row' }, head,
-        el('button', { type: 'button', class: 'ghost small', 'aria-label': 'Move up', onclick: () => move(entry, -1) }, '↑'),
-        el('button', { type: 'button', class: 'ghost small', 'aria-label': 'Move down', onclick: () => move(entry, 1) }, '↓'),
+        el('button', { type: 'button', class: 'ghost small icon-btn', 'aria-label': 'Move up', onclick: () => move(entry, -1) }, icon('up', { size: 16 })),
+        el('button', { type: 'button', class: 'ghost small icon-btn', 'aria-label': 'Move down', onclick: () => move(entry, 1) }, icon('down', { size: 16 })),
         el('button', { type: 'button', class: 'ghost danger small', onclick: () => {
           if (entries.length === 1) return toast('A quiz needs at least one question.');
           entries.splice(entries.indexOf(entry), 1);
@@ -1152,7 +1202,9 @@ function quizBuilder(body, quiz) {
       error,
       el('div', { class: 'row' },
         save,
-        el('button', { class: 'ghost', onclick: () => { if (confirm('Discard your changes?')) quizzesTab(body); } }, 'Cancel'))));
+        el('button', { class: 'ghost', onclick: async () => {
+          if (await confirmDialog({ title: 'Discard your changes?', message: 'Anything you changed since the last save is lost.', confirmLabel: 'Discard', cancelLabel: 'Keep editing', danger: true })) quizzesTab(body);
+        } }, 'Cancel'))));
   title.focus();
 }
 
@@ -1221,11 +1273,15 @@ function loadFailed(body, err, retry) {
 // ---------- room ----------
 /** Big-screen mode, on the host's projector. */
 const isStage = () => !!room?.bigScreen && isHost() && !isPlayer();
-/** Big-screen mode, on a player's phone: an answer pad. */
-const isPad = () => !!room?.bigScreen && isPlayer();
+/** "3 right in a row" mark for scoreboards. */
+const streakTag = (n) => (n >= 3 ? el('span', { class: 'streak', title: `${n} right in a row` }, icon('flame', { size: 13 }), n) : null);
+/** Places moved with the last question. */
+const moveTag = (m) => (m
+  ? el('span', { class: `move ${m > 0 ? 'up' : 'down'}`, title: m > 0 ? `Up ${m}` : `Down ${-m}` }, icon(m > 0 ? 'up' : 'down', { size: 13 }), Math.abs(m))
+  : null);
 const fmt = (n) => (Number(n) || 0).toLocaleString();
 const isTap = (type) => !type || type === 'choice' || type === 'truefalse';
-const SHAPES = ['▲', '◆', '●', '■'];
+const SHAPE_NAMES = ['triangle', 'diamond', 'circle', 'square'];
 
 function renderRoom() {
   if (room.status === 'lobby') return renderLobby();
@@ -1238,7 +1294,7 @@ function renderRoom() {
 
 function leaveButton() {
   const btn = el('button', { class: 'ghost', onclick: async () => {
-    if (isHost() && !confirm('Leaving cancels the game for everyone. Leave anyway?')) return;
+    if (isHost() && !(await confirmDialog({ title: 'Leave and cancel the game?', message: "You're the host: leaving cancels the game for everyone.", confirmLabel: 'Leave', danger: true }))) return;
     const code = room?.code;
     const r = await withPending(btn, 'Leaving…', () => send('room:leave'));
     if (!r) return;
@@ -1254,7 +1310,7 @@ function leaveButton() {
 
 function cancelGameButton() {
   const btn = el('button', { class: 'ghost danger small', onclick: async () => {
-    if (!confirm('Are you sure you want to cancel the game?')) return;
+    if (!(await confirmDialog({ title: 'Cancel the game?', message: 'Everyone goes back to the home screen and no scores are saved.', confirmLabel: 'Cancel game', cancelLabel: 'Keep playing', danger: true }))) return;
     const code = room?.code;
     const r = await withPending(btn, 'Cancelling…', () => send('game:cancel'));
     if (!r) return;
@@ -1266,10 +1322,10 @@ function cancelGameButton() {
 
 function fullscreenButton() {
   if (!document.fullscreenEnabled) return null;
-  return el('button', { class: 'ghost small', onclick: () => {
+  return el('button', { class: 'ghost small with-icon', onclick: () => {
     const p = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
     p?.catch?.(() => {});
-  } }, '⛶ Full screen');
+  } }, icon('maximize', { size: 15 }), 'Full screen');
 }
 
 function hostLine() {
@@ -1289,24 +1345,39 @@ function qrCanvas(link, cls) {
   }
 }
 
-const doubleBadge = () => el('div', { class: 'double-badge' }, '⚡ 2× DOUBLE POINTS');
+const doubleBadge = () => el('div', { class: 'double-badge' }, icon('zap', { size: 14 }), 'Double points');
+
+/** A small label with an icon (stat chips, awards, streaks). */
+const chip = (iconName, ...text) => el('span', { class: 'stat-chip' }, icon(iconName, { size: 16 }), el('span', {}, ...text));
 
 // ---------- reactions ----------
-const EMOJIS = ['👍', '😂', '🔥', '😮', '👏', '😭', '🤯', '❤️'];
+// Index = what the server counts (0-7). Each has an icon and a palette colour.
+const REACTIONS = [
+  { icon: 'thumbsUp', label: 'Thumbs up', tone: 'r-blue' },
+  { icon: 'laugh', label: 'Haha', tone: 'r-yellow' },
+  { icon: 'flame', label: 'Fire', tone: 'r-orange' },
+  { icon: 'wow', label: 'Wow', tone: 'r-yellow' },
+  { icon: 'party', label: 'Party', tone: 'r-green' },
+  { icon: 'sad', label: 'Oh no', tone: 'r-blue' },
+  { icon: 'star', label: 'Star', tone: 'r-yellow' },
+  { icon: 'heart', label: 'Love', tone: 'r-red' },
+];
 const REACT_GAP_MS = 650;
 let lastReactAt = 0;
-let reactPending = EMOJIS.map(() => 0); // my own taps not yet seen in a reactions push (already floated locally)
+let reactPending = REACTIONS.map(() => 0); // my own taps not yet seen in a reactions push (already floated locally)
 let floating = 0;
 
 function reactionBar() {
   return el('div', { class: 'react-bar', role: 'group', 'aria-label': 'Send a reaction' },
-    EMOJIS.map((e, i) => el('button', { type: 'button', class: 'react-btn', 'aria-label': `React with ${e}`, onclick: () => sendReaction(i) }, e)));
+    REACTIONS.map((r, i) => el('button', {
+      type: 'button', class: `react-btn ${r.tone}`, 'aria-label': `React: ${r.label}`, title: r.label, onclick: () => sendReaction(i),
+    }, icon(r.icon, { size: 22 }))));
 }
 
 function sendReaction(i) {
   if (Date.now() - lastReactAt < REACT_GAP_MS || !room) return;
   lastReactAt = Date.now();
-  floatEmoji(EMOJIS[i], true);
+  floatEmoji(i, true);
   reactPending[i] += 1;
   send('react', { emoji: i }).then((r) => {
     if (!r.ok || r.sent === false) reactPending[i] = Math.max(0, reactPending[i] - 1);
@@ -1319,7 +1390,7 @@ function onReactions(d) {
   counts.forEach((n, i) => {
     const mine = Math.min(n || 0, reactPending[i] || 0);
     reactPending[i] -= mine;
-    for (let k = 0; k < (n || 0) - mine; k++) queue.push(EMOJIS[i]);
+    for (let k = 0; k < (n || 0) - mine; k++) if (REACTIONS[i]) queue.push(i);
   });
   const cap = isStage() ? 40 : 18;
   queue.sort(() => Math.random() - 0.5).slice(0, cap).forEach((e, k) => {
@@ -1327,13 +1398,16 @@ function onReactions(d) {
   });
 }
 
-function floatEmoji(emoji, mine) {
-  if (floating > 60 || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+/** A reaction bubble that floats up the screen. */
+function floatEmoji(i, mine) {
+  const r = REACTIONS[i];
+  if (!r || floating > 60 || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   floating += 1;
-  const node = el('span', { class: `float-emoji${mine ? ' mine' : ''}`, 'aria-hidden': 'true' }, emoji);
+  const size = (isStage() ? 56 : 38) + Math.round(Math.random() * 14);
+  const node = el('span', { class: `float-emoji ${r.tone}${mine ? ' mine' : ''}`, 'aria-hidden': 'true' }, icon(r.icon, { size: Math.round(size * 0.55) }));
   node.style.left = `${4 + Math.random() * 88}%`;
   node.style.setProperty('--drift', `${Math.round((Math.random() - 0.5) * 120)}px`);
-  node.style.setProperty('--size', `${(isStage() ? 2.6 : 1.7) + Math.random() * 1.2}rem`);
+  node.style.setProperty('--size', `${size}px`);
   let gone = false;
   const done = () => {
     if (gone) return;
@@ -1533,15 +1607,20 @@ function markAnswered(code, index) {
 }
 
 /** A tap button for option i (shape-only on a big-screen answer pad). */
-function optionButton(q, text, i, { pad = false, stage = false } = {}) {
+/**
+ * A tap button for option i. In big-screen mode (projector and phones alike) each option also carries its shape, so
+ * people can match their phone to the big screen at a glance.
+ */
+function optionButton(q, text, i, { shaped = false } = {}) {
   const tf = q.type === 'truefalse';
-  const shape = (pad || stage) && !tf;
+  const withShape = shaped && !tf;
   return el('button', {
-    class: `opt${tf ? ' tf' : ''}${pad ? ' pad' : ''}`, 'aria-pressed': 'false', 'aria-label': shape ? `${SHAPES[i]} ${text}` : null,
+    class: `opt${tf ? ' tf' : ''}${withShape ? ' shaped' : ''}`, 'aria-pressed': 'false',
+    'aria-label': withShape ? `${text} (${SHAPE_NAMES[i]})` : null,
     onclick: () => pick(i),
   },
-  shape ? el('span', { class: 'shape', 'aria-hidden': 'true' }, SHAPES[i]) : null,
-  pad && !tf ? null : el('span', { class: 'opt-text' }, text));
+  withShape ? shape(i) : null,
+  el('span', { class: 'opt-text' }, text));
 }
 
 function typedInput() {
@@ -1617,9 +1696,9 @@ function presenterBox(q) {
       el('p', { class: 'reveal-label' }, 'Put these in order'),
       el('ul', { class: 'order-show' }, q.options.map((t) => el('li', {}, t))));
   }
-  return el('div', { class: 'type-wait' }, q.type === 'number'
-    ? `🎯 Guess the number${q.unit ? ` (${q.unit})` : ''} on your phone`
-    : '⌨️ Type your answer on your phone');
+  return el('div', { class: 'type-wait' },
+    icon(q.type === 'number' ? 'number' : 'type', { size: 28 }),
+    el('span', {}, q.type === 'number' ? `Guess the number${q.unit ? ` (${q.unit})` : ''} on your phone` : 'Type your answer on your phone'));
 }
 
 function renderQuestion() {
@@ -1630,18 +1709,18 @@ function renderQuestion() {
   if (answer?.key !== key) answer = null;
   const playing = isPlayer();
   const stage = isStage();
-  const pad = isPad();
+  const shaped = !!room.bigScreen;
   const bar = el('i');
   const timeLabel = el('span', { class: 'timer', 'aria-hidden': 'true' });
   const status = el('div', { class: 'banner info', role: 'status', hidden: true });
   const count = el('span', { class: 'muted' });
-  const options = tap ? q.options.map((text, i) => optionButton(q, text, i, { pad, stage })) : [];
+  const options = tap ? q.options.map((text, i) => optionButton(q, text, i, { shaped })) : [];
   let input = null;
   if (!tap && playing) input = type === 'type' ? typedInput(q) : type === 'number' ? numberInput(q) : orderInput(q);
   questionUi = { key, type, tap, playing, options, input, status, count, timeUp: false };
 
   const answersEl = tap
-    ? el('div', { class: `opts${type === 'truefalse' ? ' two' : ''}${pad ? ' pad-grid' : ''}${stage ? ' stage-opts' : ''}`, role: 'group', 'aria-label': 'Answers' }, options)
+    ? el('div', { class: `opts${type === 'truefalse' ? ' two' : ''}${stage ? ' stage-opts' : ''}`, role: 'group', 'aria-label': 'Answers' }, options)
     : input ? input.node : presenterBox(q);
   let content;
   if (stage) {
@@ -1657,9 +1736,7 @@ function renderQuestion() {
       answersEl,
       el('div', { class: 'row', style: 'justify-content:flex-end;margin-top:20px' }, fullscreenButton(), cancelGameButton())));
   } else {
-    content = pad
-      ? el('div', { class: 'pad-hint', tabindex: '-1' }, tap ? '👀 Look at the big screen, then tap your answer' : '👀 Question on the big screen')
-      : renderQuestionContent(q.text);
+    content = renderQuestionContent(q.text);
     clear(app).append(el('div', { class: 'card' },
       el('div', { class: 'qhead' },
         el('span', {}, `Question ${q.index + 1} of ${q.total ?? room.total}`),
@@ -1670,7 +1747,7 @@ function renderQuestion() {
       content,
       status,
       answersEl,
-      playing && tap && !pad ? el('p', { class: 'hint center' }, `Tip: press 1-${options.length} to answer`) : null,
+      playing && tap ? el('p', { class: 'hint center hide-touch' }, `Tip: press 1-${options.length} to answer`) : null,
       isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
   }
   paintQuestion();
@@ -1763,19 +1840,20 @@ function formatMine(r, ans) {
 }
 
 function revealBanner(r, mine, playing) {
-  if (!playing) return el('div', { class: 'banner info', role: 'status' }, 'Results for this question');
-  if (!mine) return el('div', { class: 'banner bad', role: 'status' }, "Time's up. You didn't answer.");
-  const streak = mine.bonus ? el('span', { class: 'streak-pill' }, `🔥 ${mine.streak} in a row · +${fmt(mine.bonus)} bonus`) : null;
-  if (mine.correct) {
-    return el('div', { class: 'banner good', role: 'status' }, `Correct! +${fmt(mine.gained)} points${r.double ? ' (2× round)' : ''}`, streak);
-  }
-  if (mine.partial) return el('div', { class: 'banner warn', role: 'status' }, `So close! +${fmt(mine.gained)} points${r.double ? ' (2× round)' : ''}`);
-  return el('div', { class: 'banner bad', role: 'status' }, 'Not quite.');
+  const banner = (tone, iconName, ...text) => el('div', { class: `banner ${tone} with-icon`, role: 'status' }, icon(iconName, { size: 20 }), el('span', { class: 'grow' }, ...text));
+  if (!playing) return banner('info', 'chart', 'Results for this question');
+  if (!mine) return banner('bad', 'clock', "Time's up. You didn't answer.");
+  const streak = mine.bonus ? el('span', { class: 'streak-pill' }, icon('flame', { size: 14 }), `${mine.streak} in a row · +${fmt(mine.bonus)}`) : null;
+  const doubled = r.double ? ' (double points)' : '';
+  if (mine.correct) return banner('good', 'checkCircle', `Correct! +${fmt(mine.gained)} points${doubled}`, streak);
+  if (mine.partial) return banner('warn', 'rise', `So close! +${fmt(mine.gained)} points${doubled}`);
+  return banner('bad', 'xCircle', 'Not quite.');
 }
 
 /** The right answer, and how the room answered. */
 function revealAnswer(r, mine, { big = false } = {}) {
   const type = r.type || 'choice';
+  const shaped = big || !!room?.bigScreen;
   if (isTap(type)) {
     const counts = r.optionCounts || [];
     const answered = r.answeredCount ?? counts.reduce((s, n) => s + (n || 0), 0);
@@ -1788,7 +1866,7 @@ function revealAnswer(r, mine, { big = false } = {}) {
         disabled: true,
         'aria-label': `${text}${i === r.correctIndex ? ' (correct)' : ''}${mine?.choice === i ? ' (your answer)' : ''}, ${label}`,
       },
-      big && type !== 'truefalse' ? el('span', { class: 'shape', 'aria-hidden': 'true' }, SHAPES[i]) : null,
+      shaped && type !== 'truefalse' ? shape(i) : null,
       el('span', { class: 'opt-text' }, text),
       el('span', { class: 'opt-count', title: label }, n.toLocaleString()),
       el('i', { class: 'opt-share', style: `transform:scaleX(${share})`, 'aria-hidden': 'true' }));
@@ -1816,7 +1894,7 @@ function revealAnswer(r, mine, { big = false } = {}) {
         ? el('div', { class: 'guesses' },
             el('p', { class: 'reveal-label' }, 'What people typed'),
             el('ul', {}, guesses.map((g) => el('li', { class: g.correct ? 'right' : 'wrong' },
-              el('span', {}, `${g.correct ? '✓' : '✗'} ${g.text}`), el('b', {}, fmt(g.count))))))
+              el('span', { class: 'with-icon' }, icon(g.correct ? 'check' : 'x', { size: 16 }), g.text), el('b', {}, fmt(g.count))))))
         : null);
   }
   return el('div', { class: 'reveal-box' },
@@ -1828,12 +1906,13 @@ function revealAnswer(r, mine, { big = false } = {}) {
 /** Fun facts about the question: how many got it, the fastest, the biggest climber, the closest guess. */
 function statChips(r) {
   const chips = [];
-  if (r.rightCount != null && r.answeredCount > 0) chips.push(`✅ ${fmt(r.rightCount)} of ${fmt(r.answeredCount)} got it right`);
-  if (r.fastest) chips.push(`⚡ Fastest: ${r.fastest.username} (${(r.fastest.ms / 1000).toFixed(1)}s)`);
-  if (r.summary?.closest) chips.push(`🎯 Closest: ${r.summary.closest.username} (${r.summary.closest.value}${r.unit ? ` ${r.unit}` : ''})`);
-  if (r.summary?.average != null) chips.push(`📊 Average guess: ${r.summary.average}`);
-  if (r.climber) chips.push(`🚀 ${r.climber.username} climbed ${r.climber.move} place${r.climber.move === 1 ? '' : 's'}`);
-  return chips.length ? el('div', { class: 'stat-chips' }, chips.map((c) => el('span', { class: 'stat-chip' }, c))) : null;
+  const b = (t) => el('b', {}, t);
+  if (r.rightCount != null && r.answeredCount > 0) chips.push(chip('checkCircle', b(`${fmt(r.rightCount)} of ${fmt(r.answeredCount)}`), ' got it right'));
+  if (r.fastest) chips.push(chip('zap', 'Fastest ', b(r.fastest.username), ` ${(r.fastest.ms / 1000).toFixed(1)}s`));
+  if (r.summary?.closest) chips.push(chip('number', 'Closest ', b(r.summary.closest.username), ` ${r.summary.closest.value}${r.unit ? ` ${r.unit}` : ''}`));
+  if (r.summary?.average != null) chips.push(chip('chart', 'Average guess ', b(r.summary.average)));
+  if (r.climber) chips.push(chip('rise', b(r.climber.username), ` climbed ${r.climber.move} place${r.climber.move === 1 ? '' : 's'}`));
+  return chips.length ? el('div', { class: 'stat-chips' }, chips) : null;
 }
 
 function renderReveal() {
@@ -1847,30 +1926,20 @@ function renderReveal() {
     el('span', {}, `Question ${r.index + 1} of ${r.total ?? room.total}`),
     el('span', {}, last ? 'Final results in ' : 'Next question in ', nextLabel));
 
-  if (isPad()) {
-    clear(app).append(el('div', { class: 'card center pad-result' },
-      qhead,
-      el('div', { class: 'pad-big', 'aria-hidden': 'true' }, !mine ? '⏰' : mine.correct ? '✅' : mine.partial ? '👌' : '❌'),
-      revealBanner(r, mine, playing),
-      r.me ? el('p', { class: 'finish-line' }, `You're ${medal(r.me.rank)} with ${fmt(r.me.score)} points`, r.me.move > 0 ? ` (▲${r.me.move})` : '') : null,
-      mine?.answer != null ? el('p', { class: 'your-answer' }, 'Your answer: ', el('b', {}, formatMine(r, mine.answer))) : null,
-      el('p', { class: 'muted' }, 'Answer: ', el('b', {}, r.answerText || '')),
-      reactionBar()));
-  } else {
-    const answered = r.answeredCount ?? 0;
-    clear(app).append(el('div', { class: 'card' },
-      qhead,
-      r.double ? doubleBadge() : null,
-      renderQuestionContent(r.text || ''),
-      revealBanner(r, mine, playing),
-      revealAnswer(r, mine),
-      statChips(r),
-      el('p', { class: 'muted answered-line' }, `${answered.toLocaleString()} of ${(r.playerCount ?? room.playerCount ?? answered).toLocaleString()} answered`),
-      el('h3', { style: 'margin-top:20px' }, 'Scoreboard'),
-      boardTable(r.leaderboard || [], r.me, true),
-      reactionBar(),
-      isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
-  }
+  // Phones get the full result in every mode (big-screen too): the answer, the facts and the scoreboard.
+  const answered = r.answeredCount ?? 0;
+  clear(app).append(el('div', { class: 'card' },
+    qhead,
+    r.double ? doubleBadge() : null,
+    renderQuestionContent(r.text || ''),
+    revealBanner(r, mine, playing),
+    revealAnswer(r, mine),
+    statChips(r),
+    el('p', { class: 'muted answered-line' }, `${answered.toLocaleString()} of ${(r.playerCount ?? room.playerCount ?? answered).toLocaleString()} answered`),
+    el('h3', { style: 'margin-top:20px' }, 'Scoreboard'),
+    boardTable(r.leaderboard || [], r.me, true),
+    reactionBar(),
+    isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
   if (typeof r.revealEndsAt === 'number') startCountdown(r.revealEndsAt, 0, null, nextLabel);
   else nextLabel.textContent = 'a moment';
 }
@@ -1906,8 +1975,8 @@ function animatedBoard(rows) {
     scores.push([score, p.score - (p.lastGain || 0), p.score]);
     const li = el('li', { class: 'anim-row' },
       el('span', { class: 'rk' }, p.rank),
-      el('span', { class: 'name' }, p.username, p.streak >= 3 ? el('span', { class: 'streak' }, `🔥${p.streak}`) : null),
-      p.move ? el('span', { class: `move ${p.move > 0 ? 'up' : 'down'}` }, p.move > 0 ? `▲${p.move}` : `▼${-p.move}`) : null,
+      el('span', { class: 'name' }, p.username, streakTag(p.streak)),
+      moveTag(p.move),
       p.lastGain ? el('span', { class: 'gain' }, `+${fmt(p.lastGain)}`) : null,
       score);
     const from = p.move > 0 ? Math.min(p.move, rows.length - i) : Math.max(p.move || 0, -i);
@@ -1945,8 +2014,8 @@ function boardTable(rows, meRow, showGain) {
     rankCell(p.rank),
     el('td', {}, p.username,
       p.userId === me.id ? el('span', { class: 'pill', style: 'margin-left:6px' }, 'you') : null,
-      p.streak >= 3 ? el('span', { class: 'streak', title: `${p.streak} right in a row` }, `🔥${p.streak}`) : null,
-      showGain && p.move ? el('span', { class: `move ${p.move > 0 ? 'up' : 'down'}`, title: p.move > 0 ? `Up ${p.move}` : `Down ${-p.move}` }, p.move > 0 ? `▲${p.move}` : `▼${-p.move}`) : null),
+      streakTag(p.streak),
+      showGain ? moveTag(p.move) : null),
     el('td', { class: 'num' }, (p.score ?? 0).toLocaleString(),
       showGain && p.lastGain ? el('span', { class: 'gain' }, `+${p.lastGain.toLocaleString()}`) : null));
   if (!top.length) return el('p', { class: 'muted' }, 'No scores yet.');
@@ -1965,15 +2034,15 @@ function podiumView(rows) {
     return el('div', { class: `podium-step p${i + 1}`, role: 'listitem' },
       el('div', { class: 'podium-name' }, p.username),
       el('div', { class: 'podium-score' }, `${fmt(p.score)} pts`),
-      el('div', { class: 'podium-block' }, el('span', { 'aria-hidden': 'true' }, ['🥇', '🥈', '🥉'][i]), el('span', { class: 'sr-only' }, medal(p.rank))));
+      el('div', { class: 'podium-block' }, el('span', { class: 'podium-rank' }, medal(p.rank))));
   }));
 }
 
 function awardChips(a) {
   const chips = [];
-  if (a?.streak) chips.push(`🔥 Longest streak: ${a.streak.username} (${a.streak.n} in a row)`);
-  if (a?.sharp) chips.push(`🎯 Most right answers: ${a.sharp.username} (${a.sharp.n})`);
-  return chips.length ? el('div', { class: 'stat-chips center' }, chips.map((c) => el('span', { class: 'stat-chip' }, c))) : null;
+  if (a?.streak) chips.push(chip('flame', 'Longest streak ', el('b', {}, a.streak.username), ` ${a.streak.n} in a row`));
+  if (a?.sharp) chips.push(chip('award', 'Most right answers ', el('b', {}, a.sharp.username), ` ${a.sharp.n}`));
+  return chips.length ? el('div', { class: 'stat-chips center' }, chips) : null;
 }
 
 function renderEnd() {

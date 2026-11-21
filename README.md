@@ -24,6 +24,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 - **Admin console** (`admin.html`, admins only): a live dashboard, a live-games monitor that can end any game, full game history, player accounts (rename, ban with a reason, kick, sign out everywhere, reset password, delete), the question bank (bulk delete, JSON import/export, category rename, Open Trivia DB import), player-quiz moderation, leaderboards, a site-wide announcement banner, rate-limit counters, system health and an audit log of every admin action. See [Admin console](#admin-console)
 - **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP sign-up and failed-login limits (sized for a whole classroom on one Wi-Fi), API Gateway throttling, least-privilege IAM roles
 - **Observability:** structured logs, custom game metrics, alarms and a CloudWatch dashboard, all created by the template
+- **Email alerts:** uptime probes every minute, plus an email when the site goes down or comes back, when errors are logged, when a deploy fails, and on sensitive admin actions. See [Email alerts](#email-alerts)
 
 ## Architecture
 
@@ -107,6 +108,7 @@ npm run test:load      # 200 players in one game (needs npm run dev running; see
 npm run preflight      # checks SAM CLI, credentials, region, Lambda quota and live games
 npm run deploy         # sam build + sam deploy + upload the frontend to S3
 npm run seed           # first time only: admin account + the sample questions
+npm run deploy -- AlertEmail=you@example.com   # once: email alerts (see Monitoring > Email alerts)
 ```
 
 The deploy prints the **`WebsiteUrl`**, an HTTPS link like `https://<bucket>.s3.<region>.amazonaws.com/index.html`. Share that one. The old plain-HTTP website address is still there (`WebsiteHttpUrl`), but browsers warn about HTTP pages. The HTTPS address has no index page, so links always name a file: `/index.html`, `/play.html?code=ABC123`.
@@ -214,13 +216,34 @@ Open `admin.html` (the **Admin** button in the game header) with an admin accoun
 
 ## Monitoring
 
-- **Dashboard** (the `DashboardUrl` output): games created, started, finished and cancelled, answers, Lambda concurrency and throttles (account-wide and per function), DynamoDB throttles and GamePlay capacity, WebSocket connections, API latency and errors, Lambda errors and duration, and a live table of recent error logs.
-- **Alarms:** `quibble-api-lambda-errors`, `quibble-websocket-lambda-errors`, `quibble-game-timer-errors`, `quibble-http-api-5xx`, `quibble-lambda-throttles` (account-wide), `quibble-game-timer-events-dropped`, `quibble-game-timer-late`, and read/write throttle alarms for the GamePlay and Games tables.
+- **Dashboard** (the `DashboardUrl` output): games created, started, finished and cancelled, answers, Lambda concurrency and throttles (account-wide and per function), DynamoDB throttles and GamePlay capacity, WebSocket connections, API latency and errors, Lambda errors and duration, uptime probes, and a live table of recent error logs.
+- **Alarms:** `quibble-health-check`, `quibble-error-logs`, `quibble-api-lambda-errors`, `quibble-websocket-lambda-errors` (connect, disconnect and messages), `quibble-game-timer-errors`, `quibble-http-api-5xx`, `quibble-lambda-throttles` (account-wide), `quibble-game-timer-events-dropped`, `quibble-game-timer-late`, read/write throttle alarms for the GamePlay and Games tables, and `quibble-monitor-errors`.
 - **Logs Insights:** `fields @timestamp, msg, error.message | filter level = "error" | sort @timestamp desc`
+
+### Email alerts
+
+Give the stack an address once, then click **Confirm subscription** in the email AWS sends to it:
+
+```bash
+npm run deploy -- AlertEmail=you@example.com AlertTimeZone=Asia/Kolkata
+npm run alerts:test     # sends a test email and says whether the address has confirmed
+```
+
+| You get an email when | How it's detected |
+|---|---|
+| **The site is down**: the website, the API + database or the WebSockets stop answering (and another email when they're back) | The monitor Lambda probes all three every minute: it loads `index.html`, calls `/api/health` (which reads DynamoDB), and opens a WebSocket handshake that a healthy `$connect` refuses with 401. Two failed minutes out of three trip `quibble-health-check`. |
+| **Errors**: a handler logs an error, a Lambda crashes or times out, or the API answers 5xx | A metric filter counts `level: "error"` log lines (the handlers catch most errors, so Lambda's own `Errors` metric misses them), plus the Lambda error and 5xx alarms. The email quotes the matching log lines. |
+| **Capacity problems**: Lambda or DynamoDB throttling, game timer events late or dropped | The existing alarms. |
+| **A deploy fails** or rolls back, or a rollback gets stuck | An EventBridge rule on the stack's CloudFormation status events. The email names the resource that failed and why. |
+| **Sensitive admin activity**: an admin role granted or removed, a player banned or deleted, a password reset, questions bulk-deleted | The admin audit log (`lib/alerts.js`). It's a tripwire in case an admin account falls into the wrong hands. |
+
+Every alarm invokes the monitor function (`handlers/monitor.js`), which turns it into a plain-language email and sends it through the `AlertsTopic` SNS topic. If the monitor itself fails, `quibble-monitor-errors` emails CloudWatch's standard message straight through SNS. To add more recipients, subscribe them to the topic (the `AlertsTopicArn` output) in the SNS console. With `AlertEmail` empty, the alarms and probes still run, but nobody is emailed.
 
 ## Cost
 
 Everything is pay-per-use and nothing runs while idle. Lambda, API Gateway and DynamoDB on-demand all fall within or near the AWS free tier for a hobby project. A 10-question game with 5 players costs a fraction of a cent.
+
+The one thing that always runs is the uptime monitor. Each month that's about 43,000 small Lambda runs, which fit in the free tier, plus as many HTTP API calls and WebSocket handshakes, which cost a few cents. CloudWatch charges about $0.10 a month for each alarm beyond the first 10 (there are 14) and $0.30 for each custom metric beyond the first 10. SNS email is free up to 1,000 emails a month.
 
 ## Project layout
 
@@ -232,7 +255,7 @@ public/                     frontend (vanilla JS, no build step), deployed to S3
   js/net.js                 HTTP client with retries and backoff
 aws/
   template.yaml             all infrastructure (AWS SAM / CloudFormation)
-  backend/src/handlers/     the five Lambda entry points
+  backend/src/handlers/     the Lambda entry points (HTTP, three WebSocket routes, game timer, monitor)
   backend/src/lib/          game engine, DynamoDB access, auth, push, metrics
   scripts/                  deploy, publish frontend, seed, preflight, Lambda quota
   local/dev-server.mjs      local stand-in for API Gateway + Lambda (with failure emulation)

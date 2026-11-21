@@ -70,7 +70,11 @@ async function otherUser(me, id, selfMessage) {
 
 // ---------- routes ----------
 const routes = [
-  ['GET', '/api/health', async () => ({ ok: true })],
+  // The monitor function calls this every minute: an answer means API Gateway, this Lambda and DynamoDB all work.
+  ['GET', '/api/health', async () => {
+    await admin.pingDatabase();
+    return { ok: true, db: 'ok' };
+  }],
 
   ['POST', '/api/auth/register', async ({ event, body }) => {
     const { email, username, password } = parse(registerSchema, body); // a typo doesn't use up the IP's sign-ups

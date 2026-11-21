@@ -2,7 +2,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Quibble - serverless multiplayer quiz. API Gateway (HTTP + WebSocket), Lambda, DynamoDB,
-  S3 static website, CloudWatch logs/metrics/alarms/dashboard, least-privilege IAM roles.
+  S3 static website, CloudWatch logs/metrics/alarms/dashboard, email alerts (SNS + a monitor Lambda),
+  least-privilege IAM roles.
 
 Parameters:
   JwtSecret:
@@ -39,6 +40,20 @@ Parameters:
     Type: String
     Default: 'http://localhost:5050'
     Description: Another origin allowed to call the HTTP API (e.g. the local dev server).
+  AlertEmail:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    Description: >
+      Where alert emails go (site down, errors, failed deploys, sensitive admin actions). AWS emails this address a
+      "Confirm subscription" link first. Empty = alarms still run, but nobody is emailed.
+  AlertTimeZone:
+    Type: String
+    Default: UTC
+    Description: Time zone for the times in alert emails (an IANA name such as Asia/Kolkata or Europe/London).
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
 
 Globals:
   Function:
@@ -347,6 +362,12 @@ Resources:
       MemorySize: 1769 # one full vCPU: bcrypt is CPU-bound and 200 people may sign up at once
       Timeout: 20 # trivia import calls an external API
       LoggingConfig: { LogGroup: !Ref ApiLogGroup }
+      Environment:
+        Variables: # sensitive admin actions are emailed (lib/alerts.js)
+          ALERTS_TOPIC: !Ref AlertsTopic
+          ALERT_TIME_ZONE: !Ref AlertTimeZone
+          STACK_NAME: !Ref AWS::StackName
+          SITE_URL: !Sub 'https://${FrontendBucket.RegionalDomainName}'
       Events:
         Api:
           Type: HttpApi
@@ -364,6 +385,7 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref RateLimitsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref QuizzesTable } # My quizzes
         - DynamoDBCrudPolicy: { TableName: !Ref AdminTable } # audit log + announcement
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt AlertsTopic.TopicName } # admin-activity alerts
         - Statement:
             - Effect: Allow
               Action: execute-api:ManageConnections
@@ -488,21 +510,40 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   WsErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub '${AWS::StackName}-websocket-lambda-errors'
-      AlarmDescription: The WebSocket message Lambda threw errors
-      Namespace: AWS/Lambda
-      MetricName: Errors
-      Dimensions: [{ Name: FunctionName, Value: !Ref WsMessageFunction }]
-      Statistic: Sum
-      Period: 300
+      AlarmDescription: A WebSocket Lambda (connect, disconnect or game messages) threw errors
+      Metrics:
+        - Id: total
+          Expression: FILL(msg, 0) + FILL(conn, 0) + FILL(disc, 0) # a function with no traffic has no data points
+          Label: WebSocket Lambda errors
+        - Id: msg
+          ReturnData: false
+          MetricStat:
+            Metric: { Namespace: AWS/Lambda, MetricName: Errors, Dimensions: [{ Name: FunctionName, Value: !Ref WsMessageFunction }] }
+            Period: 300
+            Stat: Sum
+        - Id: conn
+          ReturnData: false
+          MetricStat:
+            Metric: { Namespace: AWS/Lambda, MetricName: Errors, Dimensions: [{ Name: FunctionName, Value: !Ref WsConnectFunction }] }
+            Period: 300
+            Stat: Sum
+        - Id: disc
+          ReturnData: false
+          MetricStat:
+            Metric: { Namespace: AWS/Lambda, MetricName: Errors, Dimensions: [{ Name: FunctionName, Value: !Ref WsDisconnectFunction }] }
+            Period: 300
+            Stat: Sum
       EvaluationPeriods: 1
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   TimerErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -518,6 +559,7 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   HttpApi5xxAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -535,6 +577,7 @@ Resources:
       Threshold: 5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   # Account-wide (no dimensions): every function in this account and region shares one concurrency pool, so a
   # throttle anywhere means players are waiting. See "Capacity & scaling" in the README.
@@ -551,6 +594,7 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   TimerEventsDroppedAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -566,6 +610,7 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   TimerEventAgeAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -581,6 +626,7 @@ Resources:
       Threshold: 5000 # milliseconds
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   GamePlayWriteThrottlesAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -596,6 +642,7 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   GamePlayReadThrottlesAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -611,6 +658,7 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   GamesWriteThrottlesAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -626,6 +674,7 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
 
   GamesReadThrottlesAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -641,6 +690,164 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn] # emails you (handlers/monitor.js)
+
+  # =====================================================================
+  # Email alerts. Every alarm above invokes the monitor function, which emails the alerts topic a readable message
+  # with the matching error log lines. The monitor also probes the live site every minute and reports failed deploys.
+  # Set the address once with: npm run deploy -- AlertEmail=you@example.com (then click the link AWS emails you).
+  # =====================================================================
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Quibble alerts # the sender name in the inbox
+
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  MonitorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/quibble/${AWS::StackName}/monitor'
+      RetentionInDays: !Ref LogRetentionDays
+
+  MonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-monitor'
+      Description: Uptime probes every minute; emails alarms, failed deploys and outages to the alerts topic
+      Handler: src/handlers/monitor.handler
+      MemorySize: 256
+      Timeout: 60 # probes time out after 8 s and retry once
+      LoggingConfig: { LogGroup: !Ref MonitorLogGroup }
+      Environment:
+        Variables:
+          ALERTS_TOPIC: !Ref AlertsTopic
+          ALERT_TIME_ZONE: !Ref AlertTimeZone
+          STACK_NAME: !Ref AWS::StackName
+          SITE_URL: !Sub 'https://${FrontendBucket.RegionalDomainName}'
+          HTTP_API_URL: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+          WS_URL: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStageName}'
+          LOG_GROUP_API: !Ref ApiLogGroup
+          LOG_GROUP_WEBSOCKET: !Ref WsLogGroup
+          LOG_GROUP_TIMER: !Ref TimerLogGroup
+          LOG_GROUP_ACCESS: !Ref HttpApiAccessLogs
+          LOG_GROUP_MONITOR: !Ref MonitorLogGroup
+      Events:
+        HealthCheck:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Description: Quibble uptime probes (website, /api/health, WebSocket)
+        DeployFailed:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.cloudformation]
+              detail-type: [CloudFormation Stack Status Change]
+              detail:
+                stack-id: [!Ref AWS::StackId]
+                status-details:
+                  status: [UPDATE_ROLLBACK_COMPLETE, UPDATE_ROLLBACK_FAILED, UPDATE_FAILED, ROLLBACK_COMPLETE, ROLLBACK_FAILED, DELETE_FAILED]
+      Policies:
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt AlertsTopic.TopicName }
+        - Statement:
+            - Effect: Allow
+              Action: sns:ListSubscriptionsByTopic # npm run alerts:test shows whether the address confirmed
+              Resource: !Ref AlertsTopic
+            - Effect: Allow
+              Action: logs:FilterLogEvents # the error lines quoted in alarm emails
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/quibble/${AWS::StackName}/*'
+            - Effect: Allow
+              Action: cloudformation:DescribeStackEvents # which resource made a deploy fail
+              Resource: !Ref AWS::StackId
+
+  # CloudWatch alarms named <stack>-* may invoke the monitor.
+  MonitorAlarmPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt MonitorFunction.Arn
+      Principal: lambda.alarms.cloudwatch.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-*'
+
+  # The monitor writes HealthCheckFailed (0 or 1) every minute. Two failed minutes out of three = down; an email when
+  # it breaks and another when it recovers. Missing data (no probe ran) is not an outage: MonitorErrorsAlarm covers that.
+  HealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-health-check'
+      AlarmDescription: The website, the HTTP API + database or the WebSocket API stopped answering
+      Namespace: Quibble
+      MetricName: HealthCheckFailed
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn]
+      OKActions: [!GetAtt MonitorFunction.Arn] # "back up" email
+
+  # Lambda's Errors metric only counts crashes. The API and WebSocket handlers catch errors, log them
+  # (lib/log.js, level "error") and answer 500 / "server busy", so count those log lines too.
+  ApiErrorLogsFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApiLogGroup
+      FilterPattern: '{ $.level = "error" }'
+      MetricTransformations: [{ MetricNamespace: Quibble, MetricName: ErrorLogLines, MetricValue: '1', Unit: Count }]
+  WsErrorLogsFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WsLogGroup
+      FilterPattern: '{ $.level = "error" }'
+      MetricTransformations: [{ MetricNamespace: Quibble, MetricName: ErrorLogLines, MetricValue: '1', Unit: Count }]
+  TimerErrorLogsFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref TimerLogGroup
+      FilterPattern: '{ $.level = "error" }'
+      MetricTransformations: [{ MetricNamespace: Quibble, MetricName: ErrorLogLines, MetricValue: '1', Unit: Count }]
+
+  ErrorLogsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-error-logs'
+      AlarmDescription: The backend logged errors (failed requests, game actions or timer steps)
+      Namespace: Quibble
+      MetricName: ErrorLogLines
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!GetAtt MonitorFunction.Arn]
+
+  # The fallback: if the monitor itself fails (it can't probe or can't send), SNS emails CloudWatch's plain message.
+  MonitorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-monitor-errors'
+      AlarmDescription: !Sub 'The Quibble monitor failed, so other alerts may not reach you. See the log group /quibble/${AWS::StackName}/monitor.'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref MonitorFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
 
   Dashboard:
     Type: AWS::CloudWatch::Dashboard
@@ -728,7 +935,13 @@ Resources:
             { "type": "log", "x": 0, "y": 30, "width": 24, "height": 6, "properties": {
                 "title": "Recent errors", "region": "${AWS::Region}", "view": "table",
                 "query": "SOURCE '${ApiLogGroup}' | SOURCE '${WsLogGroup}' | SOURCE '${TimerLogGroup}' | fields @timestamp, msg, error.message | filter level = 'error' | sort @timestamp desc | limit 20"
-              } }
+              } },
+            { "type": "metric", "x": 0, "y": 36, "width": 24, "height": 6, "properties": {
+                "title": "Uptime probes and logged errors (should stay at 0)", "region": "${AWS::Region}", "period": 60, "view": "timeSeries",
+                "metrics": [
+                  [ "Quibble", "HealthCheckFailed", { "stat": "Maximum", "label": "Health check failed (1 = down)" } ],
+                  [ ".", "ErrorLogLines", { "stat": "Sum", "label": "Error log lines" } ]
+                ] } }
           ]
         }
 
@@ -755,3 +968,9 @@ Outputs:
     Value: !Ref GamePlayTable
   DashboardUrl:
     Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}'
+  AlertsTopicArn:
+    Description: SNS topic the alert emails go through (subscribe more addresses to it in the SNS console)
+    Value: !Ref AlertsTopic
+  MonitorFunctionName:
+    Description: Uptime probes + alert emails (npm run alerts:test sends a test email through it)
+    Value: !Ref MonitorFunction

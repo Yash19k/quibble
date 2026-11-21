@@ -15,6 +15,7 @@ import { client, ddb, scanAll, queryAll, nowIso, sleep } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
 import { log } from './log.js';
+import { auditAlert, sendAlert } from './alerts.js';
 import { listUsers, getUserById, deleteUserRecords } from './users.js';
 import { listQuestions, asyncCache } from './questions.js';
 import { listQuizzes, listAllQuizzes, quizSummary, adminDeleteQuiz } from './quizzes.js';
@@ -397,6 +398,16 @@ export async function audit(admin, action, target = {}, details = {}) {
   } catch (error) {
     log('error', 'Could not write the audit log', { error, action, adminId: admin.id, target });
   }
+  // Sensitive actions (admin role changes, bans, deletions, password resets) are also emailed: a tripwire in case an
+  // admin account falls into the wrong hands. Best effort too.
+  const alert = auditAlert(item);
+  if (alert) {
+    try {
+      await sendAlert(alert.subject, alert.body);
+    } catch (error) {
+      log('error', 'Could not email the admin-activity alert', { error, action });
+    }
+  }
 }
 
 const auditEntry = (i) => ({
@@ -514,11 +525,16 @@ const TABLES = () => ({
   RateLimits: env.rateLimitsTable, Admin: env.adminTable,
 });
 
-/** Health, runtime and configuration of the backend, and the size of every table. */
-export async function systemInfo() {
+/** One small read (an item that never exists): proves the database answers. Returns how long it took, in ms. */
+export async function pingDatabase() {
   const started = performance.now();
   await ddb.send(new GetCommand({ TableName: env.usersTable, Key: { pk: '#health' } }));
-  const dbLatencyMs = Math.round(performance.now() - started);
+  return Math.round(performance.now() - started);
+}
+
+/** Health, runtime and configuration of the backend, and the size of every table. */
+export async function systemInfo() {
+  const dbLatencyMs = await pingDatabase();
 
   const [tables, sockets, games] = await Promise.all([
     Promise.all(Object.entries(TABLES()).map(async ([label, name]) => {

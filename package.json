@@ -12,6 +12,7 @@
     "test:load": "node aws/tests/load.mjs",
     "preflight": "node aws/scripts/preflight.mjs",
     "quota:lambda": "node aws/scripts/quota.mjs",
+    "alerts:test": "node aws/scripts/alerts-test.mjs",
     "deploy": "node aws/scripts/deploy.mjs",
     "publish": "node aws/scripts/publish-frontend.mjs",
     "seed": "node aws/scripts/seed.mjs"

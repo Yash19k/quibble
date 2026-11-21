@@ -21,6 +21,7 @@ const actions = {
   'game:cancel': game.cancelByHost,
   'room:leave': game.leave,
   'answer:submit': game.submitAnswer,
+  react: game.react,
 };
 
 // Infrastructure hiccups (throttling, timeouts) are worth a resend; the browser does that when it sees `retry`.

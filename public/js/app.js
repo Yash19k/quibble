@@ -4,10 +4,15 @@ import {
   randomId, decodeJwt, tokenExpired, parseJoinCode, joinUrl, splitBoard, lobbyView, isStale, isFinalAnswerError,
 } from './common.js';
 import { Realtime } from './realtime.js';
+import { drawQr } from './qr.js';
+import { questionEditor, TYPE_LABELS, TYPE_ICONS } from './qeditor.js';
 
 // Game protocol spoken with the server. The server answers hello with {reload: true} when it moved on.
-const PROTOCOL = 2;
+const PROTOCOL = 3;
 const JOIN_KEY = 'quibble.join'; // join-link code, kept through login / sign-up (and reloads)
+const QUIZ_KEY = 'quibble.quiz'; // shared-quiz link id, kept through login / sign-up
+const TYPE_ORDER = ['choice', 'truefalse', 'type', 'order', 'number'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ANSWER_KEY = 'quibble.answer'; // my pick for the current question, so a reload still shows it
 const RELOAD_KEY = 'quibble.reloadedAt';
 
@@ -40,6 +45,14 @@ let hintTimer = null;
 let lastAuthCheck = 0;
 let autoJoining = false;
 let categoriesCache = null;
+// A shared quiz to host (play.html?quiz=<id>), resolved once the player is signed in.
+let quizLink = (() => {
+  const id = new URLSearchParams(location.search).get('quiz') || session.get(QUIZ_KEY);
+  return id && UUID_RE.test(id) ? id : null;
+})();
+let linkedQuiz = null; // its summary, once looked up
+// The host form's choices, kept while the page is open.
+const hostPrefs = { source: 'bank', quizId: null, types: new Set(), doublePoints: true, bigScreen: false, hostPlays: true, shuffle: false };
 
 async function send(event, data = {}) {
   const s = socket;
@@ -59,6 +72,7 @@ const isLive = () => !!room && room.status !== 'ended';
 // ---------- boot (called at the bottom, once every binding of this module exists) ----------
 function boot() {
   if (joinCode) session.set(JOIN_KEY, joinCode);
+  if (quizLink) session.set(QUIZ_KEY, quizLink);
   const token = getToken();
   if (token && tokenExpired(token)) forgetSession();
   else if (token) {
@@ -148,6 +162,7 @@ function route(force = false) {
   lobbyUi = null;
   questionUi = null;
   renderNav();
+  document.body.classList.toggle('stage', !!room && !!me && isStage());
   if (updateRequired) return renderUpdate();
   if (!me) return renderAuth(defaultAuthMode());
   if (room) return renderRoom();
@@ -258,7 +273,7 @@ function applyHello(r, stamp, s) {
 }
 
 // ---------- applying server state (version-guarded) ----------
-const SETTLED_FIELDS = ['hostId', 'hostName', 'hostPlays', 'category', 'total', 'isPlayer'];
+const SETTLED_FIELDS = ['hostId', 'hostName', 'hostPlays', 'category', 'total', 'isPlayer', 'bigScreen', 'quizTitle'];
 const SHOWN_STATUSES = new Set(['lobby', 'question', 'reveal', 'ended']);
 
 /** A full snapshot (create / join / hello ack). `fromAction`: we just created or joined it ourselves. */
@@ -307,6 +322,8 @@ function roomFromSnapshot(s) {
     hostId: s.hostId,
     hostName: s.hostName,
     hostPlays: !!s.hostPlays,
+    bigScreen: !!s.bigScreen,
+    quizTitle: s.quizTitle ?? null,
     category: s.category ?? null,
     total: s.total,
     playerCount: s.playerCount ?? 0,
@@ -356,9 +373,15 @@ const PUSHES = {
   'question:result': onQuestionResult,
   'game:end': onGameEnd,
   'game:cancelled': onGameCancelled,
+  reactions: onReactions,
 };
 
 function onPush(event, data) {
+  // Reactions also fly on the final screen (a finished game), and never change the game's state.
+  if (event === 'reactions') {
+    if (data?.code && room?.code === data.code) onReactions(data);
+    return;
+  }
   if (!data?.code || finished.has(data.code)) return;
   if (!room) {
     // A hello / create / join ack is about to say which game we're in: hold pushes until then.
@@ -396,7 +419,7 @@ function onRoomState(s) {
   // Lobby lists only matter in the lobby: a late one must never pull a running game back to it.
   if (room.status !== 'lobby' || (s.status && s.status !== 'lobby') || isStale(room, s)) return;
   if (typeof s.v === 'number') room.v = s.v;
-  for (const k of ['hostId', 'hostName', 'hostPlays', 'category', 'total', 'playerCount', 'players']) {
+  for (const k of ['hostId', 'hostName', 'hostPlays', 'bigScreen', 'quizTitle', 'category', 'total', 'playerCount', 'players']) {
     if (s[k] !== undefined) room[k] = s[k];
   }
   lastLobbyUpdate = Date.now();
@@ -607,6 +630,7 @@ function renderAuth(mode = 'login') {
   },
   el('h2', {}, register ? 'Create your account' : 'Welcome back'),
   joinCode ? el('p', { class: 'banner info' }, `${register ? 'Sign up' : 'Log in'} to join game ${joinCode}.`) : null,
+  !joinCode && quizLink ? el('p', { class: 'banner info' }, `${register ? 'Sign up' : 'Log in'} to host the quiz someone shared with you.`) : null,
   field('auth-email', 'Email', email, emailErr),
   register ? field('auth-username', 'Username', username, usernameErr) : null,
   el('label', { for: 'auth-password' }, 'Password'), el('div', { class: 'pw-field' }, password, toggle),
@@ -646,7 +670,7 @@ async function signUp({ email, username, password }) {
 function renderHome() {
   screen = 'home';
   const tabs = el('div', { class: 'tabs', role: 'tablist' },
-    ...[['play', 'Play'], ['leaderboard', 'Leaderboard'], ['history', 'My games']].map(([id, label]) =>
+    ...[['play', 'Play'], ['quizzes', 'My quizzes'], ['leaderboard', 'Leaderboard'], ['history', 'My games']].map(([id, label]) =>
       el('button', {
         role: 'tab', 'aria-selected': String(homeTab === id), class: homeTab === id ? 'active' : '',
         onclick: () => { homeTab = id; renderHome(); },
@@ -654,24 +678,61 @@ function renderHome() {
   const body = el('div', { role: 'tabpanel' });
   clear(app).append(tabs, body);
   if (homeTab === 'play') playTab(body);
+  if (homeTab === 'quizzes') quizzesTab(body);
   if (homeTab === 'leaderboard') leaderboardTab(body);
   if (homeTab === 'history') historyTab(body);
 }
 
 async function loadCategories() {
-  if (categoriesCache && Date.now() - categoriesCache.at < 60_000) return categoriesCache.list;
-  const { categories } = await api('/api/categories');
-  categoriesCache = { at: Date.now(), list: categories };
-  return categories;
+  if (categoriesCache && Date.now() - categoriesCache.at < 60_000) return categoriesCache;
+  const { categories, types = [] } = await api('/api/categories');
+  categoriesCache = { at: Date.now(), list: categories, types };
+  return categoriesCache;
+}
+
+/** A ?quiz= link: look the quiz up once (after login) and pre-select it for hosting. */
+async function resolveQuizLink() {
+  const id = quizLink;
+  quizLink = null;
+  session.set(QUIZ_KEY, null);
+  const url = new URL(location.href);
+  if (url.searchParams.has('quiz')) {
+    url.searchParams.delete('quiz');
+    history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  try {
+    const { quiz } = await api(`/api/quizzes/${encodeURIComponent(id)}`);
+    linkedQuiz = quiz;
+    hostPrefs.source = 'quiz';
+    hostPrefs.quizId = quiz.id;
+    return true;
+  } catch (err) {
+    if (err.status === 401) logout({ expired: true });
+    else toast(err.message || "Couldn't open that quiz.");
+    return false;
+  }
 }
 
 function playTab(body) {
+  if (quizLink) {
+    clear(body).append(el('p', { class: 'muted' }, 'Opening the shared quiz…'));
+    resolveQuizLink().then(() => { if (body.isConnected) playTab(body); });
+    return;
+  }
   const selectedCats = new Set(); // empty = all categories
   let catCounts = new Map();
+  let typeInfo = [];
   const catGrid = el('div', { class: 'cat-grid', role: 'group', 'aria-label': 'Categories' }, el('p', { class: 'muted' }, 'Loading categories…'));
   const catHint = el('p', { class: 'muted cat-hint' });
+  const typeGrid = el('div', { class: 'cat-grid', role: 'group', 'aria-label': 'Question types' });
+  const typeHint = el('p', { class: 'muted cat-hint' });
   const count = el('input', { id: 'q-count', type: 'number', min: 1, max: 30, value: 10 });
-  const hostPlays = el('input', { type: 'checkbox', id: 'host-plays', checked: true });
+  const hostPlays = el('input', { type: 'checkbox', id: 'host-plays', checked: hostPrefs.hostPlays && !hostPrefs.bigScreen, disabled: hostPrefs.bigScreen });
+  const bigScreen = el('input', { type: 'checkbox', id: 'big-screen', checked: hostPrefs.bigScreen });
+  const doublePts = el('input', { type: 'checkbox', id: 'double-pts', checked: hostPrefs.doublePoints });
+  const shuffle = el('input', { type: 'checkbox', id: 'quiz-shuffle', checked: hostPrefs.shuffle });
+  const quizSelect = el('select', { id: 'quiz-pick' });
+  const quizInfo = el('p', { class: 'muted cat-hint' });
   const createErr = el('div', { class: 'error', role: 'alert' });
   const failed = joinFailure;
   joinFailure = null;
@@ -680,6 +741,16 @@ function playTab(body) {
     class: 'code-input', value: failed?.code || '', 'aria-describedby': 'join-err',
   });
   const joinErr = el('div', { class: 'error', id: 'join-err', role: 'alert' }, failed?.error || '');
+
+  hostPlays.addEventListener('change', () => { hostPrefs.hostPlays = hostPlays.checked; });
+  bigScreen.addEventListener('change', () => {
+    hostPrefs.bigScreen = bigScreen.checked;
+    hostPlays.disabled = bigScreen.checked;
+    hostPlays.checked = !bigScreen.checked && hostPrefs.hostPlays;
+  });
+  doublePts.addEventListener('change', () => { hostPrefs.doublePoints = doublePts.checked; });
+  shuffle.addEventListener('change', () => { hostPrefs.shuffle = shuffle.checked; });
+  quizSelect.addEventListener('change', () => { hostPrefs.quizId = quizSelect.value || null; });
 
   // "All" clears the selection; any other box toggles in or out (pick as many as you like).
   function toggleCat(value) {
@@ -697,35 +768,123 @@ function playTab(body) {
     catHint.textContent = selectedCats.size
       ? `${selectedCats.size} selected · ${pool} questions available`
       : `All categories · ${pool} questions available`;
+    paintTypes();
   }
 
-  const createBtn = el('button', { class: 'block', onclick: () => createGame(createBtn, createErr, {
-    categories: [...selectedCats],
-    count: Math.min(30, Math.max(1, Number(count.value) || 10)),
-    hostPlays: hostPlays.checked,
-  }) }, 'Create game');
+  // Question types: an empty set means every type.
+  const typeCount = (t) => {
+    const info = typeInfo.find((x) => x.type === t);
+    if (!info) return 0;
+    return selectedCats.size ? [...selectedCats].reduce((s, c) => s + (info.byCategory?.[c] || 0), 0) : info.count;
+  };
+  function toggleType(t) {
+    const all = TYPE_ORDER;
+    if (!hostPrefs.types.size) hostPrefs.types = new Set(all.filter((x) => x !== t));
+    else if (hostPrefs.types.has(t)) {
+      if (hostPrefs.types.size === 1) return toast('Keep at least one question type.');
+      hostPrefs.types.delete(t);
+    } else {
+      hostPrefs.types.add(t);
+      if (hostPrefs.types.size === all.length) hostPrefs.types.clear();
+    }
+    paintTypes();
+  }
+  function paintTypes() {
+    const on = (t) => !hostPrefs.types.size || hostPrefs.types.has(t);
+    clear(typeGrid).append(...TYPE_ORDER.map((t) => el('button', {
+      type: 'button', class: `cat-box${on(t) ? ' active' : ''}`, 'aria-pressed': String(on(t)), onclick: () => toggleType(t),
+    }, `${TYPE_ICONS[t]} ${TYPE_LABELS[t]}`, el('span', { class: 'cat-count' }, `(${typeCount(t)})`))));
+    const matching = TYPE_ORDER.filter(on).reduce((s, t) => s + typeCount(t), 0);
+    typeHint.textContent = `${hostPrefs.types.size ? `${hostPrefs.types.size} of ${TYPE_ORDER.length} types` : 'Every type'} · ${matching} matching questions`;
+  }
+
+  const sourceBtns = [['bank', '🎲 Question bank'], ['quiz', '📝 A quiz']].map(([id, label]) =>
+    el('button', { type: 'button', 'data-src': id, onclick: () => setSource(id) }, label));
+  const bankPanel = el('div', {},
+    el('label', {}, 'Categories (pick one or more)'), catGrid, catHint,
+    el('label', {}, 'Question types'), typeGrid, typeHint,
+    el('label', { for: 'q-count' }, 'Number of questions'), count);
+  const quizPanel = el('div', {},
+    el('label', { for: 'quiz-pick' }, 'Quiz'), quizSelect, quizInfo,
+    el('label', { class: 'check-row' }, shuffle, el('span', {}, 'Shuffle the questions')));
+  function setSource(id) {
+    hostPrefs.source = id;
+    bankPanel.hidden = id !== 'bank';
+    quizPanel.hidden = id !== 'quiz';
+    sourceBtns.forEach((b) => {
+      b.classList.toggle('active', b.dataset.src === id);
+      b.setAttribute('aria-pressed', String(b.dataset.src === id));
+    });
+    if (id === 'quiz') loadQuizChoices();
+  }
+  async function loadQuizChoices() {
+    clear(quizSelect).append(el('option', { value: '' }, 'Loading…'));
+    let mine = [];
+    try {
+      ({ quizzes: mine } = await api('/api/quizzes'));
+    } catch (err) {
+      if (err.status === 401) return logout({ expired: true });
+      quizInfo.textContent = err.message;
+    }
+    const list = [...(linkedQuiz && !mine.some((q) => q.id === linkedQuiz.id) ? [linkedQuiz] : []), ...mine];
+    if (!list.some((q) => q.id === hostPrefs.quizId)) hostPrefs.quizId = null;
+    clear(quizSelect).append(
+      el('option', { value: '' }, list.length ? 'Pick a quiz…' : 'No quizzes yet'),
+      ...list.map((q) => el('option', { value: q.id }, `${q.title} · ${q.questionCount} question${q.questionCount === 1 ? '' : 's'}${q.ownerId !== me.id ? ` · by ${q.ownerName}` : ''}`)));
+    quizSelect.value = hostPrefs.quizId || '';
+    quizInfo.textContent = list.length ? '' : 'Build one in the "My quizzes" tab, or open a quiz link someone shared.';
+  }
+
+  const createBtn = el('button', { class: 'block', onclick: () => {
+    createErr.textContent = '';
+    const common = { hostPlays: hostPlays.checked && !bigScreen.checked, bigScreen: bigScreen.checked, doublePoints: doublePts.checked };
+    if (hostPrefs.source === 'quiz') {
+      if (!hostPrefs.quizId) {
+        createErr.textContent = 'Pick a quiz first.';
+        return;
+      }
+      createGame(createBtn, createErr, { ...common, quizId: hostPrefs.quizId, shuffle: shuffle.checked });
+      return;
+    }
+    createGame(createBtn, createErr, {
+      ...common,
+      categories: [...selectedCats],
+      types: [...hostPrefs.types],
+      count: Math.min(30, Math.max(1, Number(count.value) || 10)),
+    });
+  } }, 'Create game');
   const joinBtn = el('button', { class: 'block', type: 'submit' }, 'Join');
   const joinForm = el('form', { class: 'card', onsubmit: (e) => { e.preventDefault(); joinGame(code.value, joinBtn, joinErr); } },
     el('h3', {}, 'Join a game'),
-    el('p', { class: 'muted' }, 'Enter the 6-character code from the host, or open their join link.'),
+    el('p', { class: 'muted' }, 'Enter the 6-character code from the host, scan their QR code, or open their join link.'),
     el('label', { for: 'join-code' }, 'Game code'), code,
     joinErr,
     joinBtn);
 
-  body.append(el('div', { class: 'grid2' },
-    el('div', { class: 'card' },
-      el('h3', {}, 'Host a game'),
-      el('p', { class: 'muted' }, 'Create a room with a 6-character code. Play along or host for others.'),
-      el('label', {}, 'Categories (pick one or more)'), catGrid, catHint,
-      el('label', { for: 'q-count' }, 'Number of questions'), count,
-      el('label', { class: 'check-row' }, hostPlays, el('span', {}, 'Participate as a player')),
-      createErr,
-      createBtn),
-    joinForm));
+  if (linkedQuiz && hostPrefs.quizId === linkedQuiz.id) {
+    body.append(el('div', { class: 'banner info' }, `Shared quiz “${linkedQuiz.title}” by ${linkedQuiz.ownerName} is ready to host below.`));
+  }
+  body.append(
+    el('div', { class: 'grid2' },
+      el('div', { class: 'card' },
+        el('h3', {}, 'Host a game'),
+        el('p', { class: 'muted' }, 'Create a room with a 6-character code. Play along or host for others.'),
+        el('div', { class: 'tabs seg', role: 'group', 'aria-label': 'Where the questions come from' }, sourceBtns),
+        bankPanel,
+        quizPanel,
+        el('label', {}, 'Extras'),
+        el('label', { class: 'check-row' }, doublePts, el('span', {}, '⚡ Double-points rounds', el('small', {}, 'The final question and a few others score 2×'))),
+        el('label', { class: 'check-row' }, bigScreen, el('span', {}, '📺 Big-screen mode', el('small', {}, 'Show questions on a projector or TV; phones become answer pads'))),
+        el('label', { class: 'check-row' }, hostPlays, el('span', {}, 'Participate as a player')),
+        createErr,
+        createBtn),
+      joinForm));
+  setSource(hostPrefs.source);
   if (failed) code.focus();
 
-  loadCategories().then((categories) => {
+  loadCategories().then(({ list: categories, types }) => {
     catCounts = new Map(categories.map((c) => [c.category, c.count]));
+    typeInfo = types;
     clear(catGrid).append(
       el('button', { type: 'button', class: 'cat-box', 'data-cat': '', onclick: () => toggleCat('') },
         'All', el('span', { class: 'cat-count' }, `(${categories.reduce((s, c) => s + c.count, 0)})`)),
@@ -735,6 +894,7 @@ function playTab(body) {
     if (!categories.length) createErr.textContent = 'No questions yet. An admin needs to add some (or run npm run seed).';
   }).catch((err) => {
     clear(catGrid).append(el('p', { class: 'muted' }, "Couldn't load the categories. All categories will be used."));
+    paintTypes();
     if (err.status === 401) logout({ expired: true });
   });
 }
@@ -831,6 +991,171 @@ function renderJoining() {
     el('button', { class: 'ghost', onclick: () => { finishJoinLink(); route(); } }, 'Cancel')));
 }
 
+// ---------- My quizzes ----------
+const quizUrl = (id) => {
+  const url = new URL('play.html', location.href);
+  url.search = `?quiz=${encodeURIComponent(id)}`;
+  url.hash = '';
+  return url.href;
+};
+
+async function quizzesTab(body) {
+  clear(body).append(el('p', { class: 'muted' }, 'Loading…'));
+  let quizzes;
+  try {
+    ({ quizzes } = await api('/api/quizzes'));
+  } catch (err) {
+    return loadFailed(body, err, () => quizzesTab(body));
+  }
+  if (!body.isConnected) return;
+  clear(body).append(
+    el('div', { class: 'row', style: 'margin-bottom:16px' },
+      el('p', { class: 'muted grow', style: 'margin:0' }, 'Build your own quiz with any question type. Host it, or share its link so friends can host it too.'),
+      el('button', { onclick: () => quizBuilder(body, null) }, '＋ New quiz')),
+    quizzes.length
+      ? el('div', { class: 'quiz-list' }, quizzes.map((q) => quizCard(body, q)))
+      : el('div', { class: 'card center' },
+          el('p', { class: 'muted' }, "You haven't made a quiz yet."),
+          el('button', { onclick: () => quizBuilder(body, null) }, 'Make your first quiz')));
+}
+
+function quizCard(body, q) {
+  const del = el('button', { class: 'ghost danger small', onclick: async () => {
+    if (!confirm(`Delete “${q.title}”? This can't be undone.`)) return;
+    await withPending(del, 'Deleting…', async () => {
+      try {
+        await api(`/api/quizzes/${q.id}`, { method: 'DELETE' });
+        toast('Quiz deleted');
+        quizzesTab(body);
+      } catch (err) {
+        toast(err.message);
+      }
+    });
+  } }, 'Delete');
+  return el('div', { class: 'card quiz-card' },
+    el('div', { class: 'row' },
+      el('h3', { class: 'grow', style: 'margin:0' }, q.title),
+      el('span', { class: 'pill' }, q.shared ? 'shared' : 'private')),
+    q.description ? el('p', { class: 'muted', style: 'margin:8px 0 0' }, q.description) : null,
+    el('p', { class: 'hint' }, `${q.questionCount} question${q.questionCount === 1 ? '' : 's'} · edited ${String(q.updatedAt || '').slice(0, 10)}`),
+    el('div', { class: 'row', style: 'margin-top:14px' },
+      el('button', { onclick: () => { hostPrefs.source = 'quiz'; hostPrefs.quizId = q.id; homeTab = 'play'; renderHome(); } }, '▶ Host'),
+      el('button', { class: 'ghost', onclick: () => editQuiz(body, q.id) }, 'Edit'),
+      q.shared
+        ? el('button', { class: 'ghost', onclick: async () => {
+            const link = quizUrl(q.id);
+            toast((await copyText(link)) ? 'Share link copied' : link);
+          } }, '🔗 Copy link')
+        : null,
+      del));
+}
+
+async function editQuiz(body, id) {
+  clear(body).append(el('p', { class: 'muted' }, 'Loading…'));
+  try {
+    const { quiz } = await api(`/api/quizzes/${id}`);
+    if (body.isConnected) quizBuilder(body, quiz);
+  } catch (err) {
+    loadFailed(body, err, () => editQuiz(body, id));
+  }
+}
+
+const MAX_QUIZ_QUESTIONS = 30;
+
+function quizBuilder(body, quiz) {
+  const title = el('input', { id: 'quiz-title', maxlength: 60, value: quiz?.title || '', placeholder: 'e.g. Friday office trivia' });
+  const desc = el('input', { id: 'quiz-desc', maxlength: 200, value: quiz?.description || '', placeholder: 'Optional' });
+  const shared = el('input', { type: 'checkbox', checked: !!quiz?.shared });
+  const list = el('div', { class: 'quiz-questions' });
+  const error = el('div', { class: 'error', role: 'alert' });
+  const entries = [];
+  const addBtn = el('button', { type: 'button', class: 'ghost block', onclick: () => add(null, true) }, '＋ Add a question');
+
+  function move(entry, delta) {
+    const i = entries.indexOf(entry);
+    const j = i + delta;
+    if (j < 0 || j >= entries.length) return;
+    [entries[i], entries[j]] = [entries[j], entries[i]];
+    renumber();
+  }
+  function add(q, focus) {
+    if (entries.length >= MAX_QUIZ_QUESTIONS) return toast(`A quiz can have up to ${MAX_QUIZ_QUESTIONS} questions.`);
+    const ed = questionEditor(q, { withCategory: false });
+    const head = el('h3', { class: 'grow', style: 'margin:0' });
+    const entry = { ed, head, card: null };
+    entry.card = el('div', { class: 'card qcard' },
+      el('div', { class: 'row' }, head,
+        el('button', { type: 'button', class: 'ghost small', 'aria-label': 'Move up', onclick: () => move(entry, -1) }, '↑'),
+        el('button', { type: 'button', class: 'ghost small', 'aria-label': 'Move down', onclick: () => move(entry, 1) }, '↓'),
+        el('button', { type: 'button', class: 'ghost danger small', onclick: () => {
+          if (entries.length === 1) return toast('A quiz needs at least one question.');
+          entries.splice(entries.indexOf(entry), 1);
+          renumber();
+        } }, 'Remove')),
+      ed.node);
+    entries.push(entry);
+    renumber();
+    if (focus) {
+      entry.card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      ed.focus();
+    }
+  }
+  function renumber() {
+    placeChildren(list, entries.map((e) => e.card));
+    entries.forEach((e, i) => { e.head.textContent = `Question ${i + 1}`; });
+    addBtn.disabled = entries.length >= MAX_QUIZ_QUESTIONS;
+  }
+  (quiz?.questions?.length ? quiz.questions : [null]).forEach((q) => add(q, false));
+
+  const save = el('button', { onclick: () => withPending(save, 'Saving…', async () => {
+    error.textContent = '';
+    if (title.value.trim().length < 3) {
+      error.textContent = 'Give the quiz a title (at least 3 characters).';
+      title.focus();
+      return;
+    }
+    let questions;
+    try {
+      questions = entries.map((e, i) => {
+        try {
+          return e.ed.read();
+        } catch (err) {
+          e.card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          throw new Error(`Question ${i + 1}: ${err.message}`);
+        }
+      });
+    } catch (err) {
+      error.textContent = err.message;
+      return;
+    }
+    const payload = { title: title.value.trim(), description: desc.value.trim(), shared: shared.checked, questions };
+    try {
+      await api(quiz?.id ? `/api/quizzes/${quiz.id}` : '/api/quizzes', { method: quiz?.id ? 'PUT' : 'POST', body: payload });
+      toast('Quiz saved');
+      quizzesTab(body);
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  }) }, 'Save quiz');
+
+  clear(body).append(
+    el('div', { class: 'card' },
+      el('h2', {}, quiz?.id ? 'Edit quiz' : 'New quiz'),
+      el('label', { for: 'quiz-title' }, 'Title'), title,
+      el('label', { for: 'quiz-desc' }, 'Description'), desc,
+      el('label', { class: 'check-row' }, shared,
+        el('span', {}, 'Let anyone with the link host this quiz', el('small', {}, "They can run it but never see the answers"))),
+      el('p', { class: 'hint' }, `Up to ${MAX_QUIZ_QUESTIONS} questions. Mix the types: multiple choice, true/false, type it, put in order, closest number.`)),
+    list,
+    addBtn,
+    el('div', { class: 'card sticky-actions' },
+      error,
+      el('div', { class: 'row' },
+        save,
+        el('button', { class: 'ghost', onclick: () => { if (confirm('Discard your changes?')) quizzesTab(body); } }, 'Cancel'))));
+  title.focus();
+}
+
 async function leaderboardTab(body, period = 'all') {
   clear(body).append(el('p', { class: 'muted' }, 'Loading…'));
   let leaderboard;
@@ -894,6 +1219,14 @@ function loadFailed(body, err, retry) {
 }
 
 // ---------- room ----------
+/** Big-screen mode, on the host's projector. */
+const isStage = () => !!room?.bigScreen && isHost() && !isPlayer();
+/** Big-screen mode, on a player's phone: an answer pad. */
+const isPad = () => !!room?.bigScreen && isPlayer();
+const fmt = (n) => (Number(n) || 0).toLocaleString();
+const isTap = (type) => !type || type === 'choice' || type === 'truefalse';
+const SHAPES = ['▲', '◆', '●', '■'];
+
 function renderRoom() {
   if (room.status === 'lobby') return renderLobby();
   if (room.status === 'question' && room.question) return renderQuestion();
@@ -931,19 +1264,99 @@ function cancelGameButton() {
   return btn;
 }
 
-function hostLine() {
-  return `Hosted by ${room.hostName || 'the host'}${room.hostPlays ? ' (playing)' : ' (presenter)'} · ${room.total} questions · ${room.category || 'All categories'}`;
+function fullscreenButton() {
+  if (!document.fullscreenEnabled) return null;
+  return el('button', { class: 'ghost small', onclick: () => {
+    const p = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+    p?.catch?.(() => {});
+  } }, '⛶ Full screen');
 }
 
+function hostLine() {
+  const what = room.quizTitle ? `“${room.quizTitle}”` : room.category || 'All categories';
+  const mode = room.bigScreen ? ' (big screen)' : room.hostPlays ? ' (playing)' : ' (presenter)';
+  return `Hosted by ${room.hostName || 'the host'}${mode} · ${room.total} questions · ${what}`;
+}
+
+/** A canvas with the QR code of `link` (null if it can't be drawn). */
+function qrCanvas(link, cls) {
+  const c = el('canvas', { class: cls, role: 'img', 'aria-label': 'QR code of the join link' });
+  try {
+    drawQr(c, link, { scale: 8 });
+    return c;
+  } catch {
+    return null;
+  }
+}
+
+const doubleBadge = () => el('div', { class: 'double-badge' }, '⚡ 2× DOUBLE POINTS');
+
+// ---------- reactions ----------
+const EMOJIS = ['👍', '😂', '🔥', '😮', '👏', '😭', '🤯', '❤️'];
+const REACT_GAP_MS = 650;
+let lastReactAt = 0;
+let reactPending = EMOJIS.map(() => 0); // my own taps not yet seen in a reactions push (already floated locally)
+let floating = 0;
+
+function reactionBar() {
+  return el('div', { class: 'react-bar', role: 'group', 'aria-label': 'Send a reaction' },
+    EMOJIS.map((e, i) => el('button', { type: 'button', class: 'react-btn', 'aria-label': `React with ${e}`, onclick: () => sendReaction(i) }, e)));
+}
+
+function sendReaction(i) {
+  if (Date.now() - lastReactAt < REACT_GAP_MS || !room) return;
+  lastReactAt = Date.now();
+  floatEmoji(EMOJIS[i], true);
+  reactPending[i] += 1;
+  send('react', { emoji: i }).then((r) => {
+    if (!r.ok || r.sent === false) reactPending[i] = Math.max(0, reactPending[i] - 1);
+  });
+}
+
+function onReactions(d) {
+  const counts = Array.isArray(d.counts) ? d.counts : [];
+  const queue = [];
+  counts.forEach((n, i) => {
+    const mine = Math.min(n || 0, reactPending[i] || 0);
+    reactPending[i] -= mine;
+    for (let k = 0; k < (n || 0) - mine; k++) queue.push(EMOJIS[i]);
+  });
+  const cap = isStage() ? 40 : 18;
+  queue.sort(() => Math.random() - 0.5).slice(0, cap).forEach((e, k) => {
+    setTimeout(() => floatEmoji(e, false), (k * 800) / Math.max(1, Math.min(queue.length, cap)));
+  });
+}
+
+function floatEmoji(emoji, mine) {
+  if (floating > 60 || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  floating += 1;
+  const node = el('span', { class: `float-emoji${mine ? ' mine' : ''}`, 'aria-hidden': 'true' }, emoji);
+  node.style.left = `${4 + Math.random() * 88}%`;
+  node.style.setProperty('--drift', `${Math.round((Math.random() - 0.5) * 120)}px`);
+  node.style.setProperty('--size', `${(isStage() ? 2.6 : 1.7) + Math.random() * 1.2}rem`);
+  let gone = false;
+  const done = () => {
+    if (gone) return;
+    gone = true;
+    floating -= 1;
+    node.remove();
+  };
+  node.addEventListener('animationend', done, { once: true });
+  setTimeout(done, 4000);
+  document.body.append(node);
+}
+
+// ---------- lobby ----------
 function renderLobby() {
   const host = isHost();
+  const stage = isStage();
   const link = joinUrl(room.code, location.href);
   const linkInput = el('input', { id: 'join-link', readonly: true, value: link, class: 'mono', onfocus: (e) => e.target.select() });
   const copyBtn = el('button', { type: 'button', class: 'ghost', onclick: async () => {
     const ok = await copyText(link, linkInput);
     toast(ok ? 'Join link copied' : 'Select the link and copy it');
   } }, 'Copy link');
-  const startBtn = host ? el('button', { onclick: () => startGame(startBtn) }, 'Start game') : null;
+  const startBtn = host ? el('button', { class: stage ? 'big' : '', onclick: () => startGame(startBtn) }, 'Start game') : null;
   const ui = {
     code: room.code,
     heading: el('h3', { class: 'players-head' }),
@@ -954,20 +1367,46 @@ function renderLobby() {
     startBtn,
     chips: new Map(),
   };
-  clear(app).append(el('div', { class: 'card' },
-    el('p', { class: 'muted center', style: 'margin:0' }, hostLine()),
-    el('p', { class: 'sr-only' }, `Game code ${room.code.split('').join(' ')}`),
-    el('div', { class: 'code', 'aria-hidden': 'true' }, room.code.split('').map((ch) => el('span', {}, ch))),
-    el('p', { class: 'muted center' }, 'Share the code, or send this link:'),
-    el('div', { class: 'join-link' }, el('label', { for: 'join-link', class: 'sr-only' }, 'Join link'), linkInput, copyBtn),
-    ui.youIn,
-    ui.heading,
-    ui.list,
-    ui.more,
-    ui.empty,
-    el('div', { class: 'row', style: 'margin-top:16px' },
-      host ? startBtn : el('span', { class: 'muted grow' }, 'Waiting for the host to start…'),
-      leaveButton())));
+  const srCode = el('p', { class: 'sr-only' }, `Game code ${room.code.split('').join(' ')}`);
+  const codeEl = el('div', { class: 'code', 'aria-hidden': 'true' }, room.code.split('').map((ch) => el('span', {}, ch)));
+
+  if (stage) {
+    const qr = qrCanvas(link, 'qr big');
+    clear(app).append(
+      el('div', { class: 'stage-lobby' },
+        el('div', { class: 'stage-join' },
+          el('p', { class: 'stage-kicker' }, 'Join on your phone at'),
+          el('p', { class: 'stage-url' }, link.replace(/^https?:\/\//, '')),
+          el('p', { class: 'stage-kicker' }, 'with the game code'),
+          srCode, codeEl,
+          el('p', { class: 'muted' }, hostLine())),
+        qr ? el('div', { class: 'stage-qr' }, qr, el('p', { class: 'stage-kicker center' }, 'or scan me')) : null),
+      el('div', { class: 'card' },
+        ui.heading, ui.list, ui.more, ui.empty,
+        el('div', { class: 'row', style: 'margin-top:16px' },
+          startBtn, el('span', { class: 'grow' }), fullscreenButton(), copyBtn, leaveButton())));
+  } else {
+    const qr = qrCanvas(link, 'qr');
+    const qrBlock = !qr ? null
+      : host ? el('div', { class: 'lobby-qr' }, qr, el('p', { class: 'hint center' }, 'Scan to join'))
+        : el('details', { class: 'qr-details' }, el('summary', {}, 'Show the QR code (invite someone next to you)'), qr);
+    clear(app).append(el('div', { class: 'card' },
+      el('p', { class: 'muted center', style: 'margin:0' }, hostLine()),
+      srCode,
+      el('div', { class: `lobby-top${host && qr ? ' with-qr' : ''}` }, codeEl, host ? qrBlock : null),
+      el('p', { class: 'muted center' }, 'Share the code, or send this link:'),
+      el('div', { class: 'join-link' }, el('label', { for: 'join-link', class: 'sr-only' }, 'Join link'), linkInput, copyBtn),
+      host ? null : qrBlock,
+      ui.youIn,
+      ui.heading,
+      ui.list,
+      ui.more,
+      ui.empty,
+      reactionBar(),
+      el('div', { class: 'row', style: 'margin-top:16px' },
+        host ? startBtn : el('span', { class: 'muted grow' }, 'Waiting for the host to start…'),
+        leaveButton())));
+  }
   lobbyUi = ui;
   updateLobby();
 }
@@ -978,7 +1417,7 @@ function updateLobby() {
   if (!ui || ui.code !== room?.code) return;
   const view = lobbyView(room, me.id);
   const host = isHost();
-  ui.heading.textContent = `Players (${view.playerCount})`;
+  ui.heading.textContent = isStage() ? `${view.playerCount} player${view.playerCount === 1 ? '' : 's'} in` : `Players (${view.playerCount})`;
   const nodes = view.chips.map((c) => {
     let node = ui.chips.get(c.userId);
     if (!node) {
@@ -1038,6 +1477,7 @@ function startCountdown(endsAt, totalMs, bar, label, onDone) {
     const left = Math.max(0, endsAt - serverNow());
     if (bar) bar.style.transform = `scaleX(${totalMs > 0 ? Math.min(1, left / totalMs) : 0})`;
     label.textContent = `${Math.ceil(left / 1000)}s`;
+    label.classList.toggle('hurry', totalMs > 0 && left > 0 && left <= 5000);
     if (left <= 0 && !done) {
       done = true;
       clearInterval(tick);
@@ -1073,8 +1513,8 @@ function renderQuestionContent(rawText) {
 
 const answerKey = (code, index) => `${code}:${index}`;
 
-function rememberAnswer(code, index, choice) {
-  session.set(ANSWER_KEY, choice == null ? null : JSON.stringify({ code, index, choice }));
+function rememberAnswer(code, index, choice, shown) {
+  session.set(ANSWER_KEY, choice == null && shown == null ? null : JSON.stringify({ code, index, choice, shown }));
 }
 
 /** The server says we already answered this question (e.g. after a reload): show it as locked in. */
@@ -1082,41 +1522,161 @@ function markAnswered(code, index) {
   const key = answerKey(code, index);
   if (answer?.key === key && answer.state !== 'sending') return;
   let choice = answer?.key === key ? answer.choice : null;
-  if (choice == null) {
+  let shown = answer?.key === key ? answer.shown : null;
+  if (choice == null && shown == null) {
     try {
       const saved = JSON.parse(session.get(ANSWER_KEY) || 'null');
-      if (saved?.code === code && saved.index === index) choice = saved.choice;
+      if (saved?.code === code && saved.index === index) ({ choice = null, shown = null } = saved);
     } catch { /* ignore */ }
   }
-  answer = { key, choice, state: 'locked' };
+  answer = { key, choice, shown, state: 'locked' };
+}
+
+/** A tap button for option i (shape-only on a big-screen answer pad). */
+function optionButton(q, text, i, { pad = false, stage = false } = {}) {
+  const tf = q.type === 'truefalse';
+  const shape = (pad || stage) && !tf;
+  return el('button', {
+    class: `opt${tf ? ' tf' : ''}${pad ? ' pad' : ''}`, 'aria-pressed': 'false', 'aria-label': shape ? `${SHAPES[i]} ${text}` : null,
+    onclick: () => pick(i),
+  },
+  shape ? el('span', { class: 'shape', 'aria-hidden': 'true' }, SHAPES[i]) : null,
+  pad && !tf ? null : el('span', { class: 'opt-text' }, text));
+}
+
+function typedInput() {
+  const input = el('input', {
+    class: 'answer-input', maxlength: 60, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+    placeholder: 'Type your answer…', 'aria-label': 'Your answer', enterkeyhint: 'send',
+  });
+  const btn = el('button', { type: 'submit' }, 'Submit');
+  const node = el('form', { class: 'answer-form', onsubmit: (e) => {
+    e.preventDefault();
+    const v = input.value.trim();
+    if (v) submitAnswer({ text: v }, v);
+  } }, input, btn);
+  return { node, focus: () => input.focus(), setDisabled: (d) => { input.disabled = d; btn.disabled = d; } };
+}
+
+function numberInput(q) {
+  const input = el('input', {
+    class: 'answer-input', type: 'number', step: 'any', inputmode: 'decimal', placeholder: 'Your guess', 'aria-label': 'Your guess', enterkeyhint: 'send',
+  });
+  const btn = el('button', { type: 'submit' }, 'Guess');
+  const node = el('form', { class: 'answer-form', onsubmit: (e) => {
+    e.preventDefault();
+    const v = Number(input.value);
+    if (input.value.trim() !== '' && Number.isFinite(v)) submitAnswer({ value: v }, `${v}${q.unit ? ` ${q.unit}` : ''}`);
+  } }, input, q.unit ? el('span', { class: 'unit' }, q.unit) : null, btn);
+  return { node, focus: () => input.focus(), setDisabled: (d) => { input.disabled = d; btn.disabled = d; } };
+}
+
+/** Tap the items in order: 1st, 2nd, ... Tapping a placed item takes it (and everything after it) back. */
+function orderInput(q) {
+  const picked = [];
+  let disabled = false;
+  const n = q.options.length;
+  const items = q.options.map((text, i) => el('button', { type: 'button', class: 'order-item', onclick: () => toggle(i) },
+    el('span', { class: 'order-slot', 'aria-hidden': 'true' }), el('span', {}, text)));
+  const submit = el('button', { type: 'button', class: 'block', onclick: () => {
+    if (picked.length === n) submitAnswer({ order: [...picked] }, picked.map((i) => q.options[i]).join(' → '));
+  } }, 'Lock in this order');
+  const reset = el('button', { type: 'button', class: 'ghost small', onclick: () => { picked.length = 0; paint(); } }, 'Start over');
+  function toggle(i) {
+    if (disabled) return;
+    const at = picked.indexOf(i);
+    if (at >= 0) picked.splice(at);
+    else picked.push(i);
+    if (picked.length === n - 1) picked.push(q.options.findIndex((_, k) => !picked.includes(k))); // the last one places itself
+    paint();
+  }
+  function paint() {
+    items.forEach((b, i) => {
+      const p = picked.indexOf(i);
+      b.querySelector('.order-slot').textContent = p >= 0 ? String(p + 1) : '';
+      b.classList.toggle('placed', p >= 0);
+      b.setAttribute('aria-label', `${q.options[i]}${p >= 0 ? `, position ${p + 1}` : ''}`);
+      b.disabled = disabled;
+    });
+    submit.disabled = disabled || picked.length !== n;
+    reset.disabled = disabled || !picked.length;
+  }
+  paint();
+  const node = el('div', { class: 'order-input' },
+    el('p', { class: 'hint' }, 'Tap the items from first to last.'),
+    el('div', { class: 'order-list' }, items),
+    el('div', { class: 'row', style: 'justify-content:flex-end' }, reset),
+    submit);
+  return { node, focus: () => {}, setDisabled: (d) => { disabled = d; paint(); } };
+}
+
+/** What a presenter (or the big screen) shows instead of inputs for the non-tap types. */
+function presenterBox(q) {
+  if (q.type === 'order') {
+    return el('div', {},
+      el('p', { class: 'reveal-label' }, 'Put these in order'),
+      el('ul', { class: 'order-show' }, q.options.map((t) => el('li', {}, t))));
+  }
+  return el('div', { class: 'type-wait' }, q.type === 'number'
+    ? `🎯 Guess the number${q.unit ? ` (${q.unit})` : ''} on your phone`
+    : '⌨️ Type your answer on your phone');
 }
 
 function renderQuestion() {
   const q = room.question;
+  const type = q.type || 'choice';
+  const tap = isTap(type);
   const key = answerKey(room.code, q.index);
   if (answer?.key !== key) answer = null;
   const playing = isPlayer();
+  const stage = isStage();
+  const pad = isPad();
   const bar = el('i');
   const timeLabel = el('span', { class: 'timer', 'aria-hidden': 'true' });
   const status = el('div', { class: 'banner info', role: 'status', hidden: true });
   const count = el('span', { class: 'muted' });
-  const options = q.options.map((text, i) => el('button', { class: 'opt', 'aria-pressed': 'false', onclick: () => pick(i) }, text));
-  const content = renderQuestionContent(q.text);
-  questionUi = { key, playing, options, status, count, timeUp: false };
-  clear(app).append(el('div', { class: 'card' },
-    el('div', { class: 'qhead' },
-      el('span', {}, `Question ${q.index + 1} of ${q.total ?? room.total}`),
-      count,
-      timeLabel),
-    el('div', { class: 'bar', 'aria-hidden': 'true' }, bar),
-    content,
-    status,
-    el('div', { class: 'opts', role: 'group', 'aria-label': 'Answers' }, options),
-    playing ? el('p', { class: 'hint center' }, 'Tip: press 1-4 to answer') : null,
-    isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
+  const options = tap ? q.options.map((text, i) => optionButton(q, text, i, { pad, stage })) : [];
+  let input = null;
+  if (!tap && playing) input = type === 'type' ? typedInput(q) : type === 'number' ? numberInput(q) : orderInput(q);
+  questionUi = { key, type, tap, playing, options, input, status, count, timeUp: false };
+
+  const answersEl = tap
+    ? el('div', { class: `opts${type === 'truefalse' ? ' two' : ''}${pad ? ' pad-grid' : ''}${stage ? ' stage-opts' : ''}`, role: 'group', 'aria-label': 'Answers' }, options)
+    : input ? input.node : presenterBox(q);
+  let content;
+  if (stage) {
+    clear(app).append(el('div', { class: 'stage-q' },
+      el('div', { class: 'stage-qhead' },
+        el('span', {}, `Question ${q.index + 1} of ${q.total ?? room.total}`),
+        q.double ? doubleBadge() : null,
+        count),
+      el('div', { class: 'bar big', 'aria-hidden': 'true' }, bar),
+      el('div', { class: 'stage-qmain' },
+        (content = renderQuestionContent(q.text)),
+        el('div', { class: 'stage-timer' }, timeLabel)),
+      answersEl,
+      el('div', { class: 'row', style: 'justify-content:flex-end;margin-top:20px' }, fullscreenButton(), cancelGameButton())));
+  } else {
+    content = pad
+      ? el('div', { class: 'pad-hint', tabindex: '-1' }, tap ? '👀 Look at the big screen, then tap your answer' : '👀 Question on the big screen')
+      : renderQuestionContent(q.text);
+    clear(app).append(el('div', { class: 'card' },
+      el('div', { class: 'qhead' },
+        el('span', {}, `Question ${q.index + 1} of ${q.total ?? room.total}`),
+        count,
+        timeLabel),
+      el('div', { class: 'bar', 'aria-hidden': 'true' }, bar),
+      q.double ? doubleBadge() : null,
+      content,
+      status,
+      answersEl,
+      playing && tap && !pad ? el('p', { class: 'hint center' }, `Tip: press 1-${options.length} to answer`) : null,
+      isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
+  }
   paintQuestion();
   if (document.hasFocus() && (!document.activeElement || document.activeElement === document.body || app.contains(document.activeElement))) {
-    content.focus({ preventScroll: true });
+    if (input && !answer) input.focus();
+    else content.focus({ preventScroll: true });
   }
   startCountdown(q.endsAt, (q.timeLimit || 0) * 1000, bar, timeLabel, () => {
     if (questionUi?.key !== key) return;
@@ -1143,11 +1703,12 @@ function paintQuestion() {
     b.classList.toggle('sending', picked && mine.state === 'sending');
     b.setAttribute('aria-pressed', String(picked));
   });
+  ui.input?.setDisabled(!ui.playing || !!mine || ui.timeUp);
   let text = '';
   let tone = 'info';
-  if (!ui.playing) text = 'Presenter mode · Answers are hidden on this screen';
+  if (!ui.playing) text = ui.tap ? 'Presenter mode · Answers are hidden on this screen' : 'Presenter mode · Players answer on their phones';
   else if (mine?.state === 'sending') text = 'Sending your answer…';
-  else if (mine?.state === 'locked') text = 'Answer locked in. Waiting for the others…';
+  else if (mine?.state === 'locked') text = !ui.tap && mine.shown ? `Locked in: ${mine.shown}. Waiting for the others…` : 'Answer locked in. Waiting for the others…';
   else if (mine?.state === 'closed') { text = mine.note; tone = 'bad'; }
   else if (ui.timeUp) text = "Time's up! Waiting for the results…";
   ui.status.hidden = !text;
@@ -1155,29 +1716,36 @@ function paintQuestion() {
   ui.status.className = `banner ${tone}`;
 }
 
-async function pick(choice) {
+function pick(choice) {
+  const q = room?.question;
+  submitAnswer({ choice }, q?.options?.[choice] ?? null);
+}
+
+/** Sends an answer of any type ({choice} / {text} / {order} / {value}); `shown` is how it reads on screen. */
+async function submitAnswer(payload, shown) {
   const ui = questionUi;
   if (!ui || !ui.playing || ui.timeUp || answer?.key === ui.key) return;
   const { code } = room;
   const { index } = room.question;
-  answer = { key: ui.key, choice, state: 'sending' };
-  rememberAnswer(code, index, choice);
+  const choice = payload.choice ?? null;
+  answer = { key: ui.key, choice, shown, state: 'sending' };
+  rememberAnswer(code, index, choice, shown);
   paintQuestion();
-  const r = await send('answer:submit', { code, index, choice });
+  const r = await send('answer:submit', { code, index, ...payload });
   if (answer?.key !== ui.key || answer.state !== 'sending') return; // moved on, or a snapshot settled it
   if (r.ok) answer.state = 'locked';
-  else if (isFinalAnswerError(r.error)) answer = { key: ui.key, choice: null, state: 'closed', note: r.error };
+  else if (isFinalAnswerError(r.error)) answer = { key: ui.key, choice: null, shown: null, state: 'closed', note: r.error };
   else {
     // Retryable (busy server, lost connection): let the player try again.
     answer = null;
-    rememberAnswer(code, index, null);
+    rememberAnswer(code, index, null, null);
     toast(r.error || "Couldn't send your answer. Try again.");
   }
   paintQuestion();
 }
 
 function answerHotkey(e) {
-  if (!questionUi || e.altKey || e.ctrlKey || e.metaKey || e.target?.closest?.('input, textarea, select')) return;
+  if (!questionUi || !questionUi.tap || e.altKey || e.ctrlKey || e.metaKey || e.target?.closest?.('input, textarea, select')) return;
   const i = '1234'.indexOf(e.key);
   if (i >= 0 && i < questionUi.options.length && !questionUi.options[i].disabled) {
     e.preventDefault();
@@ -1186,47 +1754,188 @@ function answerHotkey(e) {
 }
 
 // ---------- reveal ----------
+/** How my answer reads (non-tap types). */
+function formatMine(r, ans) {
+  if (ans == null) return '';
+  if (r.type === 'order' && Array.isArray(ans)) return ans.map((i) => r.options?.[i] ?? '?').join(' → ');
+  if (r.type === 'number') return `${ans}${r.unit ? ` ${r.unit}` : ''}`;
+  return String(ans);
+}
+
+function revealBanner(r, mine, playing) {
+  if (!playing) return el('div', { class: 'banner info', role: 'status' }, 'Results for this question');
+  if (!mine) return el('div', { class: 'banner bad', role: 'status' }, "Time's up. You didn't answer.");
+  const streak = mine.bonus ? el('span', { class: 'streak-pill' }, `🔥 ${mine.streak} in a row · +${fmt(mine.bonus)} bonus`) : null;
+  if (mine.correct) {
+    return el('div', { class: 'banner good', role: 'status' }, `Correct! +${fmt(mine.gained)} points${r.double ? ' (2× round)' : ''}`, streak);
+  }
+  if (mine.partial) return el('div', { class: 'banner warn', role: 'status' }, `So close! +${fmt(mine.gained)} points${r.double ? ' (2× round)' : ''}`);
+  return el('div', { class: 'banner bad', role: 'status' }, 'Not quite.');
+}
+
+/** The right answer, and how the room answered. */
+function revealAnswer(r, mine, { big = false } = {}) {
+  const type = r.type || 'choice';
+  if (isTap(type)) {
+    const counts = r.optionCounts || [];
+    const answered = r.answeredCount ?? counts.reduce((s, n) => s + (n || 0), 0);
+    const opts = (r.options || []).map((text, i) => {
+      const n = counts[i] || 0;
+      const share = answered > 0 ? n / answered : 0;
+      const label = `${n} ${n === 1 ? 'answer' : 'answers'}`;
+      return el('button', {
+        class: `opt reveal${type === 'truefalse' ? ' tf' : ''}${i === r.correctIndex ? ' correct' : ' dim'}${mine?.choice === i ? ' picked' : ''}`,
+        disabled: true,
+        'aria-label': `${text}${i === r.correctIndex ? ' (correct)' : ''}${mine?.choice === i ? ' (your answer)' : ''}, ${label}`,
+      },
+      big && type !== 'truefalse' ? el('span', { class: 'shape', 'aria-hidden': 'true' }, SHAPES[i]) : null,
+      el('span', { class: 'opt-text' }, text),
+      el('span', { class: 'opt-count', title: label }, n.toLocaleString()),
+      el('i', { class: 'opt-share', style: `transform:scaleX(${share})`, 'aria-hidden': 'true' }));
+    });
+    return el('div', { class: `opts${type === 'truefalse' ? ' two' : ''}${big ? ' stage-opts' : ''}` }, opts);
+  }
+  const yours = mine && mine.answer != null
+    ? el('p', { class: 'your-answer' }, 'Your answer: ', el('b', {}, formatMine(r, mine.answer)))
+    : null;
+  const s = r.summary || {};
+  if (type === 'order') {
+    return el('div', { class: 'reveal-box' },
+      el('p', { class: 'reveal-label' }, 'The right order'),
+      el('ol', { class: 'order-show correct' }, (r.correctOrder || []).map((i) => el('li', {}, r.options?.[i] ?? ''))),
+      yours,
+      s.perfect != null ? el('p', { class: 'muted' }, `${fmt(s.perfect)} got it perfect`) : null);
+  }
+  if (type === 'type') {
+    const guesses = s.guesses || [];
+    return el('div', { class: 'reveal-box' },
+      el('p', { class: 'reveal-label' }, 'Answer'),
+      el('p', { class: 'reveal-answer' }, r.answerText),
+      yours,
+      guesses.length
+        ? el('div', { class: 'guesses' },
+            el('p', { class: 'reveal-label' }, 'What people typed'),
+            el('ul', {}, guesses.map((g) => el('li', { class: g.correct ? 'right' : 'wrong' },
+              el('span', {}, `${g.correct ? '✓' : '✗'} ${g.text}`), el('b', {}, fmt(g.count))))))
+        : null);
+  }
+  return el('div', { class: 'reveal-box' },
+    el('p', { class: 'reveal-label' }, 'Answer'),
+    el('p', { class: 'reveal-answer' }, r.answerText),
+    yours);
+}
+
+/** Fun facts about the question: how many got it, the fastest, the biggest climber, the closest guess. */
+function statChips(r) {
+  const chips = [];
+  if (r.rightCount != null && r.answeredCount > 0) chips.push(`✅ ${fmt(r.rightCount)} of ${fmt(r.answeredCount)} got it right`);
+  if (r.fastest) chips.push(`⚡ Fastest: ${r.fastest.username} (${(r.fastest.ms / 1000).toFixed(1)}s)`);
+  if (r.summary?.closest) chips.push(`🎯 Closest: ${r.summary.closest.username} (${r.summary.closest.value}${r.unit ? ` ${r.unit}` : ''})`);
+  if (r.summary?.average != null) chips.push(`📊 Average guess: ${r.summary.average}`);
+  if (r.climber) chips.push(`🚀 ${r.climber.username} climbed ${r.climber.move} place${r.climber.move === 1 ? '' : 's'}`);
+  return chips.length ? el('div', { class: 'stat-chips' }, chips.map((c) => el('span', { class: 'stat-chip' }, c))) : null;
+}
+
 function renderReveal() {
   const r = room.result;
+  if (isStage()) return renderStageReveal(r);
   const playing = isPlayer();
   const mine = r.myChoice || null;
-  let banner;
-  if (!playing) banner = el('div', { class: 'banner info', role: 'status' }, 'Results for this question');
-  else if (!mine || mine.choice == null) banner = el('div', { class: 'banner bad', role: 'status' }, "Time's up. You didn't answer.");
-  else if (mine.correct) banner = el('div', { class: 'banner good', role: 'status' }, `Correct! +${(mine.gained ?? 0).toLocaleString()} points`);
-  else banner = el('div', { class: 'banner bad', role: 'status' }, 'Not quite.');
-
-  const counts = r.optionCounts || [];
-  const answered = r.answeredCount ?? counts.reduce((s, n) => s + (n || 0), 0);
-  const opts = (r.options || []).map((text, i) => {
-    const n = counts[i] || 0;
-    const share = answered > 0 ? n / answered : 0;
-    const label = `${n} ${n === 1 ? 'answer' : 'answers'}`;
-    return el('button', {
-      class: `opt reveal${i === r.correctIndex ? ' correct' : ' dim'}${mine?.choice === i ? ' picked' : ''}`,
-      disabled: true,
-      'aria-label': `${text}${i === r.correctIndex ? ' (correct)' : ''}${mine?.choice === i ? ' (your answer)' : ''}, ${label}`,
-    },
-    el('span', { class: 'opt-text' }, text),
-    el('span', { class: 'opt-count', title: label }, n.toLocaleString()),
-    el('i', { class: 'opt-share', style: `transform:scaleX(${share})`, 'aria-hidden': 'true' }));
-  });
-
   const last = r.index + 1 >= (r.total ?? room.total);
   const nextLabel = el('span', { class: 'timer' });
-  clear(app).append(el('div', { class: 'card' },
-    el('div', { class: 'qhead' },
-      el('span', {}, `Question ${r.index + 1} of ${r.total ?? room.total}`),
-      el('span', {}, last ? 'Final results in ' : 'Next question in ', nextLabel)),
-    renderQuestionContent(r.text || ''),
-    banner,
-    el('div', { class: 'opts' }, opts),
-    el('p', { class: 'muted answered-line' }, `${answered.toLocaleString()} of ${(r.playerCount ?? room.playerCount ?? answered).toLocaleString()} answered`),
-    el('h3', { style: 'margin-top:20px' }, 'Scoreboard'),
-    boardTable(r.leaderboard || [], r.me, true),
-    isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
+  const qhead = el('div', { class: 'qhead' },
+    el('span', {}, `Question ${r.index + 1} of ${r.total ?? room.total}`),
+    el('span', {}, last ? 'Final results in ' : 'Next question in ', nextLabel));
+
+  if (isPad()) {
+    clear(app).append(el('div', { class: 'card center pad-result' },
+      qhead,
+      el('div', { class: 'pad-big', 'aria-hidden': 'true' }, !mine ? '⏰' : mine.correct ? '✅' : mine.partial ? '👌' : '❌'),
+      revealBanner(r, mine, playing),
+      r.me ? el('p', { class: 'finish-line' }, `You're ${medal(r.me.rank)} with ${fmt(r.me.score)} points`, r.me.move > 0 ? ` (▲${r.me.move})` : '') : null,
+      mine?.answer != null ? el('p', { class: 'your-answer' }, 'Your answer: ', el('b', {}, formatMine(r, mine.answer))) : null,
+      el('p', { class: 'muted' }, 'Answer: ', el('b', {}, r.answerText || '')),
+      reactionBar()));
+  } else {
+    const answered = r.answeredCount ?? 0;
+    clear(app).append(el('div', { class: 'card' },
+      qhead,
+      r.double ? doubleBadge() : null,
+      renderQuestionContent(r.text || ''),
+      revealBanner(r, mine, playing),
+      revealAnswer(r, mine),
+      statChips(r),
+      el('p', { class: 'muted answered-line' }, `${answered.toLocaleString()} of ${(r.playerCount ?? room.playerCount ?? answered).toLocaleString()} answered`),
+      el('h3', { style: 'margin-top:20px' }, 'Scoreboard'),
+      boardTable(r.leaderboard || [], r.me, true),
+      reactionBar(),
+      isHost() ? el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancelGameButton()) : null));
+  }
   if (typeof r.revealEndsAt === 'number') startCountdown(r.revealEndsAt, 0, null, nextLabel);
   else nextLabel.textContent = 'a moment';
+}
+
+function renderStageReveal(r) {
+  const last = r.index + 1 >= (r.total ?? room.total);
+  const nextLabel = el('span', { class: 'timer' });
+  clear(app).append(el('div', { class: 'stage-reveal' },
+    el('div', { class: 'stage-qhead' },
+      el('span', {}, `Question ${r.index + 1} of ${r.total ?? room.total}`),
+      r.double ? doubleBadge() : null,
+      el('span', {}, last ? 'Final results in ' : 'Next question in ', nextLabel)),
+    el('div', { class: 'stage-cols' },
+      el('div', {},
+        renderQuestionContent(r.text || ''),
+        revealAnswer(r, null, { big: true }),
+        statChips(r)),
+      el('div', { class: 'card stage-board' },
+        el('h3', {}, 'Leaderboard'),
+        animatedBoard((r.leaderboard || []).slice(0, 5)))),
+    el('div', { class: 'row', style: 'justify-content:flex-end;margin-top:20px' }, fullscreenButton(), cancelGameButton())));
+  if (typeof r.revealEndsAt === 'number') startCountdown(r.revealEndsAt, 0, null, nextLabel);
+  else nextLabel.textContent = 'a moment';
+}
+
+/** Rows slide from where they were before this question to where they are now, and scores count up. */
+function animatedBoard(rows) {
+  if (!rows.length) return el('p', { class: 'muted' }, 'No scores yet.');
+  const ROW = 64; // px: .anim-row height + gap
+  const scores = [];
+  const list = el('ol', { class: 'anim-board' }, rows.map((p, i) => {
+    const score = el('b', { class: 'anim-score' }, fmt(p.score - (p.lastGain || 0)));
+    scores.push([score, p.score - (p.lastGain || 0), p.score]);
+    const li = el('li', { class: 'anim-row' },
+      el('span', { class: 'rk' }, p.rank),
+      el('span', { class: 'name' }, p.username, p.streak >= 3 ? el('span', { class: 'streak' }, `🔥${p.streak}`) : null),
+      p.move ? el('span', { class: `move ${p.move > 0 ? 'up' : 'down'}` }, p.move > 0 ? `▲${p.move}` : `▼${-p.move}`) : null,
+      p.lastGain ? el('span', { class: 'gain' }, `+${fmt(p.lastGain)}`) : null,
+      score);
+    const from = p.move > 0 ? Math.min(p.move, rows.length - i) : Math.max(p.move || 0, -i);
+    li.style.transform = `translateY(${from * ROW}px)`;
+    return li;
+  }));
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    for (const li of list.children) {
+      li.classList.add('go');
+      li.style.transform = '';
+    }
+    for (const [node, from, to] of scores) countUp(node, from, to, 900);
+  }));
+  return list;
+}
+
+function countUp(node, from, to, ms) {
+  if (from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    node.textContent = fmt(to);
+    return;
+  }
+  const start = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / ms);
+    node.textContent = fmt(Math.round(from + (to - from) * (1 - (1 - t) ** 3)));
+    if (t < 1 && node.isConnected) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 /** Top 10, plus my own row under a gap when I'm further down. */
@@ -1234,7 +1943,10 @@ function boardTable(rows, meRow, showGain) {
   const { top, me: extra } = splitBoard(rows, meRow);
   const row = (p, cls = '') => el('tr', { class: `${cls}${p.userId === me.id ? ' me-row' : ''}`.trim() },
     rankCell(p.rank),
-    el('td', {}, p.username, p.userId === me.id ? el('span', { class: 'pill', style: 'margin-left:6px' }, 'you') : null),
+    el('td', {}, p.username,
+      p.userId === me.id ? el('span', { class: 'pill', style: 'margin-left:6px' }, 'you') : null,
+      p.streak >= 3 ? el('span', { class: 'streak', title: `${p.streak} right in a row` }, `🔥${p.streak}`) : null,
+      showGain && p.move ? el('span', { class: `move ${p.move > 0 ? 'up' : 'down'}`, title: p.move > 0 ? `Up ${p.move}` : `Down ${-p.move}` }, p.move > 0 ? `▲${p.move}` : `▼${-p.move}`) : null),
     el('td', { class: 'num' }, (p.score ?? 0).toLocaleString(),
       showGain && p.lastGain ? el('span', { class: 'gain' }, `+${p.lastGain.toLocaleString()}`) : null));
   if (!top.length) return el('p', { class: 'muted' }, 'No scores yet.');
@@ -1245,21 +1957,45 @@ function boardTable(rows, meRow, showGain) {
 }
 
 // ---------- end ----------
+function podiumView(rows) {
+  const top = rows.slice(0, 3);
+  if (!top.length) return null;
+  return el('div', { class: 'podium', role: 'list', 'aria-label': 'Top three' }, [1, 0, 2].filter((i) => top[i]).map((i) => {
+    const p = top[i];
+    return el('div', { class: `podium-step p${i + 1}`, role: 'listitem' },
+      el('div', { class: 'podium-name' }, p.username),
+      el('div', { class: 'podium-score' }, `${fmt(p.score)} pts`),
+      el('div', { class: 'podium-block' }, el('span', { 'aria-hidden': 'true' }, ['🥇', '🥈', '🥉'][i]), el('span', { class: 'sr-only' }, medal(p.rank))));
+  }));
+}
+
+function awardChips(a) {
+  const chips = [];
+  if (a?.streak) chips.push(`🔥 Longest streak: ${a.streak.username} (${a.streak.n} in a row)`);
+  if (a?.sharp) chips.push(`🎯 Most right answers: ${a.sharp.username} (${a.sharp.n})`);
+  return chips.length ? el('div', { class: 'stat-chips center' }, chips.map((c) => el('span', { class: 'stat-chip' }, c))) : null;
+}
+
 function renderEnd() {
   const f = room.final || {};
   const rows = f.leaderboard || [];
   const mine = f.me || rows.find((p) => p.userId === me.id) || null;
   const players = f.playerCount ?? room.playerCount;
-  clear(app).append(el('div', { class: 'card' },
-    el('h2', {}, 'Game over!'),
+  const stage = isStage();
+  clear(app).append(el('div', { class: `card${stage ? ' stage-end' : ''}` },
+    el('h2', { class: 'center' }, 'Game over!'),
     mine
-      ? el('p', { class: 'finish-line', role: 'status' },
+      ? el('p', { class: 'finish-line center', role: 'status' },
           `You finished ${medal(mine.rank)}${players ? ` of ${players.toLocaleString()}` : ''} with ${(mine.score ?? 0).toLocaleString()} points (${mine.correctCount ?? 0} correct).`)
       : null,
+    podiumView(rows),
+    awardChips(f.awards),
     rows.length ? boardTable(rows, mine, false) : el('p', { class: 'muted' }, 'No players.'),
+    stage ? null : reactionBar(),
     el('div', { class: 'row', style: 'margin-top:16px' },
       el('button', { onclick: () => { room = null; homeTab = 'leaderboard'; route(); } }, 'See leaderboard'),
-      el('button', { class: 'ghost', onclick: () => { room = null; homeTab = 'play'; route(); } }, 'Back to home'))));
+      el('button', { class: 'ghost', onclick: () => { room = null; homeTab = 'play'; route(); } }, 'Back to home'),
+      stage ? fullscreenButton() : null)));
 }
 
 boot();

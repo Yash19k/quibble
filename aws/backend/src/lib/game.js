@@ -14,6 +14,8 @@ import { ddb, scanAll, nowIso, sleep } from './db.js';
 import { env } from './config.js';
 import { GameError } from './errors.js';
 import { pickRandom } from './questions.js';
+import { getQuiz } from './quizzes.js';
+import * as Q from './qtypes.js';
 import { getUserById, setCurrentGame, clearCurrentGame, userKey, publicUser } from './users.js';
 import { signToken } from './auth.js';
 import { connectionsForUser, setConnectionGame, clearConnectionGame, deleteConnectionRecord } from './connections.js';
@@ -356,6 +358,27 @@ async function finalFor(h, viewer) {
   return V.gameEnd(h, result?.top10 ?? [], me);
 }
 
+/** All items in random order. */
+function sampleAll(items) {
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/** Which questions of an n-question game are worth double: always the last one, plus ~1 in 5 others (never the first). */
+export function doubleRounds(n, random = Math.random) {
+  const out = new Set();
+  if (n < 2) return out;
+  out.add(n - 1);
+  const extra = Math.floor((n - 1) / 5);
+  const pool = Array.from({ length: n - 2 }, (_, i) => i + 1); // 1 .. n-2
+  for (let i = 0; i < extra && pool.length; i++) out.add(pool.splice(Math.floor(random() * pool.length), 1)[0]);
+  return out;
+}
+
 // ---------- public operations (WebSocket actions: (user, data, ctx); ctx = { connectionId, conn, now, defer }) ----------
 export async function create(user, data, ctx) {
   const requestId = data.requestId || null;
@@ -374,18 +397,39 @@ export async function create(user, data, ctx) {
     seen = fresh.currentGame;
   }
 
-  const cats = [...new Set([...(data.categories || []), ...(data.category ? [data.category] : [])])];
-  const questions = await pickRandom(cats, data.count);
-  if (!questions.length) throw new GameError(`There are no questions for ${cats.length > 1 ? 'those categories' : 'that category'} yet.`);
+  let cats = [];
+  let picked;
+  let quizTitle = null;
+  if (data.quizId) {
+    // A quiz someone made: its own questions, in its own order (or shuffled).
+    const quiz = await getQuiz(data.quizId);
+    if (!quiz || (quiz.ownerId !== user.id && !quiz.shared)) throw new GameError("That quiz doesn't exist or isn't shared.");
+    if (!quiz.questions?.length) throw new GameError('That quiz has no questions yet.');
+    picked = data.shuffle ? sampleAll(quiz.questions) : quiz.questions;
+    quizTitle = quiz.title;
+  } else {
+    cats = [...new Set([...(data.categories || []), ...(data.category ? [data.category] : [])])];
+    picked = await pickRandom(cats, data.count, data.types);
+    if (!picked.length) {
+      throw new GameError(data.types?.length
+        ? 'No questions of those types in those categories yet. Pick more types or categories.'
+        : `There are no questions for ${cats.length > 1 ? 'those categories' : 'that category'} yet.`);
+    }
+  }
+  const doubles = data.doublePoints ? doubleRounds(picked.length) : new Set();
+  const questions = picked.map((q, i) => Q.prepareQuestion(q, { double: doubles.has(i) }));
 
   const rid = requestId || `none-${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
-  const hostPlays = !!data.hostPlays;
+  // Big-screen mode: the host's screen is the projector, so the host never plays from it.
+  const bigScreen = !!data.bigScreen;
+  const hostPlays = !!data.hostPlays && !bigScreen;
   for (let attempt = 0; ; attempt++) {
     const now = Date.now();
     const code = Array.from({ length: 6 }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join('');
     const header = {
-      code, status: 'lobby', version: 1, hostId: user.id, hostName: user.username, hostPlays,
-      category: V.categoryLabel(cats), categories: cats, createRequestId: rid, total: questions.length, qIndex: -1,
+      code, status: 'lobby', version: 1, hostId: user.id, hostName: user.username, hostPlays, bigScreen,
+      quizTitle, doublePoints: !!data.doublePoints,
+      category: quizTitle ?? V.categoryLabel(cats), categories: cats, createRequestId: rid, total: questions.length, qIndex: -1,
       questionStartedAt: 0, endsAt: 0, acceptUntil: 0, revealEndsAt: 0, playerCount: hostPlays ? 1 : 0,
       createdAt: nowIso(), lobbyExpiresAt: now + LOBBY_TTL_MS, expiresAt: gd.ttlAfterDays(KEEP_FINISHED_DAYS), resultsSaved: false,
     };
@@ -584,7 +628,7 @@ async function openQuestion(code, k, { header, members } = {}) {
   const acceptUntil = endsAt + env.lateGraceMs;
   const gate = {
     ...gd.keys.gate(code, k), k, startedAt: now, endsAt, acceptUntil,
-    correctIndex: q.correctIndex, optionCount: q.options.length, timeLimitMs: q.timeLimit * 1000,
+    correctIndex: Q.isTapType(Q.typeOf(q)) ? q.correctIndex : -1, optionCount: Q.gateOptionCount(q), timeLimitMs: q.timeLimit * 1000,
     expected: roster.filter(V.isConnected).length, answered: 0, expiresAt: playTtl(),
   };
   const fields = { status: 'question', qIndex: k, questionStartedAt: now, endsAt, acceptUntil };
@@ -623,21 +667,27 @@ export async function submitAnswer(user, data, ctx) {
     k = h.qIndex;
   }
 
+  // The answer must fit the question's type (an option index, a typed word, an order, a number).
+  const question = (await gd.getQuestions(code))?.[k];
+  if (!question) throw new GameError('No question is open right now.');
+  const given = Q.normalizeAnswer(question, data);
+  const tap = given.choice !== undefined;
+
   // 1. Write the answer BEFORE it can be counted, so a counted seat always has its answer on record.
-  //    A resend keeps the original choice and arrival time.
-  let choice = data.choice;
+  //    A resend keeps the original answer and arrival time.
+  let choice = tap ? given.choice : 0; // non-tap types always pass the gate's option check as option 0
   let answeredAt = at;
   try {
     await ddb.send(new PutCommand({
       TableName: T(),
-      Item: { ...gd.keys.answer(code, k, seat), seat, userId: user.id, choice, at, expiresAt: playTtl() },
+      Item: { ...gd.keys.answer(code, k, seat), seat, userId: user.id, ...given, at, expiresAt: playTtl() },
       ...gd.expr({ condition: 'attribute_not_exists(#sk)' }),
     }));
   } catch (err) {
     ignoreCheckFailed(err);
     const prev = await gd.getAnswer(code, k, seat);
     if (prev) {
-      choice = prev.choice;
+      if (tap && Number.isInteger(prev.choice)) choice = prev.choice;
       answeredAt = prev.at;
     }
   }
@@ -759,7 +809,7 @@ async function endGame(code) {
   const [members, scoresItem] = await Promise.all([gd.queryMembers(code), gd.getScores(code)]);
   const board = V.rankRows(V.rosterOf(members), scoresItem?.scores ?? {});
   await saveResults({ ...h, endedAt }, board); // before the header says "ended", so results are never lost
-  const fields = { status: 'ended', endedAt, resultsSaved: true, expiresAt: gd.ttlAfterDays(KEEP_FINISHED_DAYS) };
+  const fields = { status: 'ended', endedAt, resultsSaved: true, awards: V.awardsOf(board), expiresAt: gd.ttlAfterDays(KEEP_FINISHED_DAYS) };
   if (!(await commit([{ Update: headerUpdate(h, fields, { status: h.status }) }]))) return;
 
   const after = { ...h, ...fields, version: h.version + 1 };
@@ -871,6 +921,92 @@ export async function kickUser(userId) {
   await disconnectUser(userId);
 }
 
+// ---------- emoji reactions (lobby, results, final screen) ----------
+// A reaction is one conditional write on the member (at most one per REACT_GAP_MS each) plus one counter bump on one
+// of a few shard items. The counters are pushed to everyone at most once per REACT_WINDOW_MS, so a whole room
+// tapping away costs ~1 push a second, not one per tap.
+const REACT_GAP_MS = 600;
+const REACT_WINDOW_MS = 800;
+const REACT_AFTER_END_MS = 10 * 60 * 1000;
+export const REACTION_KINDS = 8;
+
+const reactionsOpen = (h, now) =>
+  !!h && (h.status === 'lobby' || h.status === 'reveal' || (h.status === 'ended' && now - Date.parse(h.endedAt ?? 0) < REACT_AFTER_END_MS));
+
+export async function react(user, { emoji }, ctx) {
+  const code = ctx?.conn?.gameCode || user.currentGame;
+  if (!code) throw new GameError("You're not in a game.");
+  const now = Date.now();
+  if (!reactionsOpen(await gd.getHeader(code, { consistent: false }), now)) return { sent: false };
+  try {
+    await update(T(), gd.keys.member(code, user.id), {
+      update: 'SET #lastReactAt = :now',
+      condition: 'attribute_exists(#sk) AND (attribute_not_exists(#lastReactAt) OR #lastReactAt < :cut)',
+      values: { ':now': now, ':cut': now - REACT_GAP_MS },
+    });
+  } catch (err) {
+    ignoreCheckFailed(err); // too soon after the last one (or not a member): silently dropped
+    return { sent: false };
+  }
+  await update(T(), gd.keys.reactions(code, Math.floor(Math.random() * gd.REACTION_SHARDS)), {
+    update: `ADD #e${emoji} :one SET #expiresAt = if_not_exists(#expiresAt, :exp)`,
+    values: { ':one': 1, ':exp': playTtl() },
+  });
+  deferOnce(ctx, `react:${code}`, () => requestReactionPush(code));
+  return { sent: true };
+}
+
+async function requestReactionPush(code) {
+  const now = Date.now();
+  const claims = await gd.getClaims(code);
+  if (claims?.reactDue && claims.reactDue > now - LOBBY_CLAIM_STALE_MS) return; // a pending push will carry ours
+  const due = now + REACT_WINDOW_MS;
+  try {
+    await update(T(), gd.keys.claims(code), {
+      update: 'SET #reactDue = :due, #expiresAt = if_not_exists(#expiresAt, :exp)',
+      condition: 'attribute_not_exists(#reactDue) OR #reactDue < :stale',
+      values: { ':due': due, ':exp': playTtl(), ':stale': now - LOBBY_CLAIM_STALE_MS },
+    });
+  } catch (err) {
+    ignoreCheckFailed(err);
+    return;
+  }
+  try {
+    await scheduleAdvance({ kind: 'reactions', code, due, dueAt: due });
+  } catch (err) {
+    await update(T(), gd.keys.claims(code), { update: 'REMOVE #reactDue', condition: '#reactDue = :due', values: { ':due': due } }).catch(() => {});
+    throw err;
+  }
+}
+
+async function reactionTimer({ code, due, dueAt }) {
+  const wait = (dueAt ?? due) - Date.now();
+  if (wait > 0) await sleep(wait);
+  try {
+    // Release the claim BEFORE collecting: reactions after this point schedule their own push.
+    await update(T(), gd.keys.claims(code), { update: 'REMOVE #reactDue', condition: '#reactDue = :due', values: { ':due': due } });
+  } catch (err) {
+    ignoreCheckFailed(err);
+    return;
+  }
+  const kinds = Array.from({ length: REACTION_KINDS }, (_, i) => `#e${i}`).join(', ');
+  const counts = Array.from({ length: REACTION_KINDS }, () => 0);
+  // Take and reset each shard's counters in one atomic step (ALL_OLD = what they were).
+  await Promise.all(Array.from({ length: gd.REACTION_SHARDS }, async (_, s) => {
+    try {
+      const res = await update(T(), gd.keys.reactions(code, s), { update: `REMOVE ${kinds}`, condition: 'attribute_exists(#pk)' }, { ReturnValues: 'ALL_OLD' });
+      for (let i = 0; i < REACTION_KINDS; i++) counts[i] += Number(res.Attributes?.[`e${i}`] ?? 0);
+    } catch (err) {
+      ignoreCheckFailed(err); // nobody reacted on this shard
+    }
+  }));
+  if (!counts.some((n) => n > 0)) return;
+  const h = await gd.getHeader(code, { consistent: false });
+  if (!reactionsOpen(h, Date.now())) return;
+  const members = await gd.queryMembers(code, { consistent: false });
+  await broadcast(h, members, 'reactions', () => ({ code, v: h.version, counts }));
+}
+
 // ---------- timers (GameTimer Lambda) ----------
 /** Entry point of the GameTimer Lambda. Every kind is idempotent: duplicates and late deliveries are harmless. */
 export async function runTimer(event) {
@@ -879,6 +1015,7 @@ export async function runTimer(event) {
   if (kind === 'reveal') return revealTimer(event);
   if (kind === 'lobby') return lobbyTimer(event);
   if (kind === 'unstick') return unstick(event.code);
+  if (kind === 'reactions') return reactionTimer(event);
   log('warn', 'unknown timer event', { event });
 }
 

@@ -2,6 +2,7 @@
 // it asynchronously with a GameTimer event and it sleeps until `dueAt` (see advance() in lib/game.js):
 //   {kind:'question', code, qIndex, dueAt}   {kind:'reveal', code, qIndex, dueAt}
 //   {kind:'lobby', code, due, dueAt}         {kind:'unstick', code, dueAt}
+//   {kind:'reactions', code, due, dueAt}
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { env } from './config.js';
 import { httpAgents } from './db.js';

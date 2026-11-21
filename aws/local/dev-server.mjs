@@ -25,7 +25,7 @@ import bcrypt from 'bcryptjs';
 import { WebSocketServer } from 'ws';
 import { DynamoDBClient, CreateTableCommand, DescribeTableCommand, ListTablesCommand } from '@aws-sdk/client-dynamodb';
 import { ROOT_DIR } from '../scripts/stack.mjs';
-import { QUESTIONS } from '../scripts/questions.js';
+import { seedQuestions } from '../scripts/questions.js';
 
 const PORT = Number(process.env.LOCAL_PORT) || 5050;
 const DDB = process.env.DYNAMODB_ENDPOINT || 'http://localhost:8000';
@@ -47,6 +47,7 @@ Object.assign(process.env, {
   CONNECTIONS_TABLE: `${PREFIX}connections`,
   RESULTS_TABLE: `${PREFIX}results`,
   RATE_LIMITS_TABLE: `${PREFIX}rate-limits`,
+  QUIZZES_TABLE: `${PREFIX}quizzes`,
   JWT_SECRET: process.env.LOCAL_JWT_SECRET || 'local-dev-only-secret-0123456789abcdef0123456789',
   WS_ENDPOINT: 'http://local',
   TIMER_FUNCTION: 'local-timer',
@@ -79,6 +80,12 @@ const TABLES = [
   },
   { TableName: process.env.RESULTS_TABLE, AttributeDefinitions: [S('userId'), S('sk')], KeySchema: [H('userId'), R('sk')] },
   { TableName: process.env.RATE_LIMITS_TABLE, AttributeDefinitions: [S('key')], KeySchema: [H('key')] },
+  {
+    TableName: process.env.QUIZZES_TABLE,
+    AttributeDefinitions: [S('id'), S('ownerId'), S('updatedAt')],
+    KeySchema: [H('id')],
+    GlobalSecondaryIndexes: [{ IndexName: 'byOwner', KeySchema: [H('ownerId'), R('updatedAt')], Projection: { ProjectionType: 'ALL' } }],
+  },
 ];
 
 // Keys + index names: enough to spot a table left over from an older schema.
@@ -262,7 +269,7 @@ const { capacityReport } = await imp('lib/db.js');
     admin = (await upsertAdmin({ email, username: process.env.ADMIN_USERNAME || 'admin', passwordHash: await bcrypt.hash(password, 10) })).user;
     console.log(`seeded admin ${email} / ${password}`);
   }
-  const added = await insertMany(QUESTIONS.map(([text, options, correctIndex, category, timeLimit]) => ({ text, options, correctIndex, category, timeLimit })), admin.id);
+  const added = await insertMany(seedQuestions(), admin.id);
   if (added) console.log(`seeded ${added} questions`);
 }
 

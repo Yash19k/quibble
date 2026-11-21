@@ -2,13 +2,14 @@
 import bcrypt from 'bcryptjs';
 import { requireAuth, requireAdmin, signToken } from '../lib/auth.js';
 import { createUser, getUserByEmail, listUsers, publicUser, updateUser } from '../lib/users.js';
-import { categories, createQuestion, deleteQuestion, insertMany, listQuestions, mapQuestion, updateQuestion } from '../lib/questions.js';
+import { categories, createQuestion, deleteQuestion, insertMany, listQuestions, mapQuestion, typeCounts, updateQuestion } from '../lib/questions.js';
+import { createQuiz, deleteQuiz, getQuiz, listQuizzes, quizFull, quizSummary, updateQuiz } from '../lib/quizzes.js';
 import { leaderboard, history, aggregate, allResults, refreshBoards } from '../lib/results.js';
 import { gameStats, kickUser } from '../lib/game.js';
 import { fetchTriviaQuestions, OPENTDB_CATEGORIES } from '../lib/trivia.js';
 import { limitRegister, assertLoginAllowed, recordLoginFailure } from '../lib/ratelimit.js';
 import { HttpError } from '../lib/errors.js';
-import { parse, registerSchema, loginSchema, questionSchema, userPatchSchema, triviaImportSchema } from '../lib/schemas.js';
+import { parse, registerSchema, loginSchema, questionSchema, quizSchema, userPatchSchema, triviaImportSchema } from '../lib/schemas.js';
 import { log, metric } from '../lib/log.js';
 
 const MAX_BODY = 50 * 1024;
@@ -70,7 +71,41 @@ const routes = [
 
   ['GET', '/api/auth/me', async ({ event }) => ({ user: await requireAuth(event) })],
 
-  ['GET', '/api/categories', async () => ({ categories: await categories() })],
+  ['GET', '/api/categories', async () => {
+    const [cats, types] = await Promise.all([categories(), typeCounts()]);
+    return { categories: cats, types };
+  }],
+
+  // ---------- My quizzes (any signed-in player) ----------
+  ['GET', '/api/quizzes', async ({ event }) => {
+    const user = await requireAuth(event);
+    return { quizzes: (await listQuizzes(user.id)).map(quizSummary) };
+  }],
+
+  ['POST', '/api/quizzes', async ({ event, body }) => {
+    const user = await requireAuth(event);
+    return [201, { quiz: quizFull(await createQuiz(user, parse(quizSchema, body))) }];
+  }],
+
+  // The owner gets everything; anyone else only the summary of a shared quiz (enough to host it, never the answers).
+  ['GET', '/api/quizzes/:id', async ({ event, params }) => {
+    const user = await requireAuth(event);
+    const quiz = await getQuiz(params.id);
+    if (quiz && quiz.ownerId === user.id) return { quiz: quizFull(quiz), mine: true };
+    if (quiz?.shared) return { quiz: quizSummary(quiz), mine: false };
+    throw new HttpError(404, "That quiz doesn't exist or isn't shared.");
+  }],
+
+  ['PUT', '/api/quizzes/:id', async ({ event, body, params }) => {
+    const user = await requireAuth(event);
+    return { quiz: quizFull(await updateQuiz(user, params.id, parse(quizSchema, body))) };
+  }],
+
+  ['DELETE', '/api/quizzes/:id', async ({ event, params }) => {
+    const user = await requireAuth(event);
+    await deleteQuiz(user, params.id);
+    return { ok: true };
+  }],
 
   ['GET', '/api/leaderboard', async ({ query }) => {
     const period = query.period === 'week' ? 'week' : 'all';

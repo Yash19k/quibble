@@ -2,7 +2,7 @@
 // No test framework in here: both a node:test suite and a plain script import it.
 import crypto from 'node:crypto';
 
-export const PROTOCOL = 2;
+export const PROTOCOL = 3;
 
 // Questions made by ensureLoadTestQuestions(): 5 s timers keep timer-closed questions short, and the text names the
 // correct option ("... pick Charlie") so a test can answer right or wrong on purpose.

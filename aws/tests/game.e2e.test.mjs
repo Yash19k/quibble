@@ -1,4 +1,4 @@
-// End-to-end tests (protocol 2) against a running Quibble backend: the local emulator (npm run dev) or a deployment:
+// End-to-end tests (protocol 3) against a running Quibble backend: the local emulator (npm run dev) or a deployment:
 //   QA_API=https://xxx.execute-api... QA_WS=wss://xxx... ADMIN_PASSWORD=... npm run test:e2e
 // Optional:
 //   QA_MAX_PLAYERS=n   the server's MAX_PLAYERS when it was lowered (asserted exactly; MAX_PLAYERS in this shell works
@@ -198,7 +198,7 @@ class Client {
     this.drop();
   }
 
-  /** hello / sync with protocol 2; asserts the ack is a usable one. */
+  /** hello / sync with the current protocol; asserts the ack is a usable one. */
   async hello(event = 'hello') {
     const ack = await this.send(event, { protocol: PROTOCOL });
     assert.equal(ack.ok, true, `${this.label}: ${event} failed: ${ack.error}`);
@@ -437,7 +437,7 @@ test('hello: protocol check, profile in the ack, ping, no-ops outside a game', a
   const c = await connect(t, u);
   const old = await c.send('hello', {});
   assert.equal(old.ok, true, old.error);
-  assert.equal(old.reload, true, 'a page without protocol 2 is told to reload');
+  assert.equal(old.reload, true, 'a page without protocol 3 is told to reload');
   assert.equal((await c.send('hello', { protocol: 1 })).reload, true);
 
   const ack = await c.hello();
@@ -1050,6 +1050,157 @@ test('an answer for a question that is not open yet does not lock the later answ
   await Promise.all([p1.send('answer:submit', { code, index: 1, choice: pick }), p2.send('answer:submit', { code, index: 1, choice: pick })]);
   const r = await p1.next('question:result', (x) => x.index === 1, 20_000);
   assertMyChoice(r, pick);
+});
+
+// ---------- My quizzes, question types, streaks, reactions, big screen ----------
+const QUIZ = {
+  title: 'E2E every type',
+  description: 'one of each',
+  shared: false,
+  questions: [
+    { type: 'choice', text: 'Pick B', options: ['A', 'B', 'C'], correctIndex: 1, timeLimit: 5 },
+    { type: 'truefalse', text: 'Water is wet.', correctIndex: 0, timeLimit: 5 },
+    { type: 'type', text: 'Capital of France?', answers: ['Paris'], timeLimit: 5 },
+    { type: 'order', text: 'Count up', items: ['one', 'two', 'three', 'four'], timeLimit: 5 },
+    { type: 'number', text: 'Bones in the body?', answer: 206, tolerance: 0, unit: 'bones', timeLimit: 5 },
+  ],
+};
+
+test('My quizzes: create, list, privacy, sharing, edit, delete', async () => {
+  const [owner, other] = await Promise.all([register('qowner'), register('qother')]);
+  const bad = await api('/api/quizzes', { method: 'POST', token: owner.token, body: { ...QUIZ, questions: [{ type: 'order', text: 'Too few', items: ['a', 'b'] }] } });
+  assert.equal(bad.status, 400);
+  const created = await api('/api/quizzes', { method: 'POST', token: owner.token, body: QUIZ });
+  assert.equal(created.status, 201);
+  const { quiz } = created.body;
+  assert.equal(quiz.questionCount, 5);
+  assert.deepEqual(quiz.questions[1].options, ['True', 'False'], 'true/false questions get their two options');
+  assert.equal((await api('/api/quizzes', { method: 'POST', body: QUIZ })).status, 401);
+
+  const listed = (await api('/api/quizzes', { token: owner.token })).body.quizzes;
+  assert.ok(listed.some((q) => q.id === quiz.id && q.questions === undefined), 'lists carry no questions');
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { token: other.token })).status, 404, 'private quizzes are invisible to others');
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { method: 'PUT', token: other.token, body: QUIZ })).status, 404);
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { method: 'DELETE', token: other.token })).status, 404);
+
+  const shared = await api(`/api/quizzes/${quiz.id}`, { method: 'PUT', token: owner.token, body: { ...QUIZ, title: 'Shared now', shared: true } });
+  assert.equal(shared.status, 200);
+  const seen = await api(`/api/quizzes/${quiz.id}`, { token: other.token });
+  assert.equal(seen.status, 200);
+  assert.equal(seen.body.quiz.title, 'Shared now');
+  assert.equal(seen.body.quiz.questions, undefined, 'a shared quiz never shows its answers to others');
+  assert.equal(seen.body.mine, false);
+
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { method: 'DELETE', token: owner.token })).status, 200);
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { token: owner.token })).status, 404);
+});
+
+test('a quiz game with every question type: typed answers, orders, numbers, streaks and reactions', { timeout: 120_000 }, async (t) => {
+  const [hostUser, u1, u2] = await Promise.all([register('qhost'), register('qp1'), register('qp2')]);
+  const { quiz } = (await api('/api/quizzes', { method: 'POST', token: hostUser.token, body: { ...QUIZ, shared: true } })).body;
+  const h = await connect(t, hostUser);
+  const p1 = await connect(t, u1);
+  const p2 = await connect(t, u2);
+  await Promise.all([h.hello(), p1.hello(), p2.hello()]);
+
+  // A shared quiz can be hosted by someone else; big-screen mode forces the host out of the player list.
+  const borrowed = await p2.send('game:create', { quizId: quiz.id, bigScreen: true, hostPlays: true, requestId: rid() });
+  assert.equal(borrowed.ok, true, borrowed.error);
+  assert.equal(borrowed.snapshot.bigScreen, true);
+  assert.equal(borrowed.snapshot.hostPlays, false);
+  assert.equal(borrowed.snapshot.quizTitle, QUIZ.title);
+  assert.equal((await p2.send('game:cancel', {})).ok, true);
+
+  const ack = await h.send('game:create', { quizId: quiz.id, bigScreen: true, doublePoints: true, requestId: rid() });
+  assert.equal(ack.ok, true, ack.error);
+  const { code } = ack;
+  assert.equal(ack.snapshot.total, 5);
+  await joinOk(p1, code);
+  await joinOk(p2, code);
+
+  // Reactions in the lobby: rate-limited per player, batched into one push.
+  const r1 = await p1.send('react', { emoji: 2 });
+  assert.equal(r1.ok, true);
+  assert.equal(r1.sent, true);
+  assert.equal((await p1.send('react', { emoji: 2 })).sent, false, 'a second tap right away is dropped');
+  assert.equal((await p2.send('react', { emoji: 5 })).sent, true);
+  assert.equal((await p1.send('react', { emoji: 9 })).ok, false, 'unknown emoji');
+  const pushed = await h.next('reactions', (d) => d.code === code, 10_000);
+  await sleep(1500);
+  const total = h.all('reactions', (d) => d.code === code).reduce((acc, d) => acc.map((n, i) => n + (d.counts[i] || 0)), Array(8).fill(0));
+  assert.equal(pushed.counts.length, 8);
+  assert.equal(total[2], 1);
+  assert.equal(total[5], 1);
+
+  assert.equal((await h.send('game:start', {})).ok, true);
+  // p1 answers everything right, p2 gets two wrong.
+  const answersP1 = [{ choice: 1 }, { choice: 0 }, { text: 'paris' }, null, { value: 206 }];
+  const answersP2 = [{ choice: 0 }, { choice: 0 }, { text: 'London' }, null, { value: 103 }];
+  for (let k = 0; k < 5; k++) {
+    const q = await p1.next('question:show', (x) => x.index === k, 20_000);
+    assert.equal(q.type, QUIZ.questions[k].type);
+    for (const key of ['correctIndex', 'correctOrder', 'answers', 'answer']) assert.equal(q[key], undefined, `question ${k} leaks ${key}`);
+    if (k === 3) {
+      // Order: the shown options are shuffled; answer with the right order (p1) and with two swapped (p2).
+      const right = QUIZ.questions[3].items.map((item) => q.options.indexOf(item));
+      answersP1[3] = { order: right };
+      answersP2[3] = { order: [right[1], right[0], right[2], right[3]] };
+      assert.notDeepEqual(q.options, QUIZ.questions[3].items, 'never shown in the right order');
+      assert.equal((await p1.send('answer:submit', { code, index: k, choice: 0 })).error, 'Invalid option.', 'the answer must fit the type');
+    }
+    const [a1, a2] = await Promise.all([
+      p1.send('answer:submit', { code, index: k, ...answersP1[k] }),
+      p2.send('answer:submit', { code, index: k, ...answersP2[k] }),
+    ]);
+    assert.equal(a1.ok, true, `p1 q${k}: ${a1.error}`);
+    assert.equal(a2.ok, true, `p2 q${k}: ${a2.error}`);
+    const r = await p1.next('question:result', (x) => x.index === k, 20_000);
+    assert.equal(r.myChoice.correct, true, `p1 got question ${k} right`);
+    assert.equal(r.myChoice.streak, k + 1);
+    assert.equal(r.myChoice.bonus, k >= 2 ? (k - 1) * 100 : 0, 'streak bonus from the 3rd in a row');
+    assert.equal(r.double, k === 4, 'double points: the last question (the only one besides the first in a 5-question game)');
+    assert.ok(r.answerText, 'the reveal says the answer');
+    if (k === 2) {
+      assert.equal(r.answerText, 'Paris');
+      assert.deepEqual(r.summary.guesses.map((g) => g.correct).sort(), [false, true]);
+      assert.equal(r.rightCount, 1);
+      assert.equal(r.fastest?.username, u1.username);
+    }
+    if (k === 3) {
+      const r2 = await p2.next('question:result', (x) => x.index === 3, 20_000);
+      assert.equal(r2.myChoice.correct, false);
+      assert.equal(r2.myChoice.partial, true, 'two of four in place is partly right');
+      assert.equal(r2.myChoice.gained, 250);
+    }
+    if (k === 4) {
+      assert.equal(r.summary.closest.username, u1.username);
+      assert.equal(r.summary.average, 154.5);
+      assert.ok(r.myChoice.gained >= 500 * 2 + 300, 'doubled points plus the 5-in-a-row bonus');
+    }
+  }
+  const end = await p1.next('game:end', (d) => d.code === code, 30_000);
+  assert.equal(end.me.rank, 1);
+  assert.equal(end.awards.streak.username, u1.username);
+  assert.equal(end.awards.streak.n, 5);
+  // Reactions still fly on the final screen.
+  assert.equal((await p2.send('react', { emoji: 0 })).sent, true);
+  await p1.next('reactions', (d) => d.code === code && d.counts[0] >= 1, 10_000);
+});
+
+test('the bank can be filtered by question type', async (t) => {
+  const u = await register('qtypes');
+  const c = await connect(t, u);
+  await c.hello();
+  const cats = (await api('/api/categories', { token: u.token })).body;
+  assert.ok(Array.isArray(cats.types) && cats.types.some((x) => x.type === 'truefalse' && x.count > 0), 'the seed has true/false questions');
+  const ack = await c.send('game:create', { types: ['truefalse'], count: 3, hostPlays: true, requestId: rid() });
+  assert.equal(ack.ok, true, ack.error);
+  const none = await (async () => {
+    await c.send('game:cancel', {});
+    return c.send('game:create', { categories: [LOAD_CATEGORY], types: ['order'], count: 3, requestId: rid() });
+  })();
+  assert.equal(none.ok, false);
+  assert.match(none.error, /types/);
 });
 
 test("the local server's handlers never crashed during these tests", async (t) => {

@@ -3,7 +3,7 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { QUESTIONS } from './questions.js';
+import { seedQuestions } from './questions.js';
 
 // AWS SDK clients (stack.mjs: root devDependencies; lib/*: aws/backend) - explain a missing one instead of crashing.
 async function load(spec) {
@@ -41,8 +41,6 @@ if (created) {
   console.log(`Admin ${email} already exists (made sure it has the admin role; password unchanged).`);
 }
 
-const added = await insertMany(
-  QUESTIONS.map(([text, options, correctIndex, category, timeLimit]) => ({ text, options, correctIndex, category, timeLimit })),
-  user.id
-);
-console.log(`Added ${added} new questions (${QUESTIONS.length - added} already existed).`);
+const all = seedQuestions();
+const added = await insertMany(all, user.id);
+console.log(`Added ${added} new questions (${all.length - added} already existed).`);

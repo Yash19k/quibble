@@ -13,6 +13,13 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 - **The server decides everything.** It holds the answers, runs the clock, measures answer speed and scores every answer. The browser only ever sends "I picked option 2"
 - **Speed scoring:** 1000 points for an instant correct answer, sliding down to 500 at the buzzer
 - **Reconnect-safe and self-healing:** refresh or drop your connection mid-game and you land back in the same question; a missed update is recovered automatically
+- **Five question types:** multiple choice, true/false, *type it* (forgives capitals, accents and small typos), *put in order* (partly right still scores) and *closest number* (close guesses earn points; the reveal names the closest guess)
+- **Streaks and double points:** 3+ right answers in a row earn a growing bonus (+100 up to +500); hosts can switch on double-points rounds (always the final question)
+- **Richer results:** answer breakdown, how many got it right, the fastest right answer, the biggest climber, rank arrows and popular typed answers; a podium and awards at the end
+- **Join by QR code:** the lobby draws a QR code of the join link (generated in the browser, no CDN)
+- **Emoji reactions** in the lobby, on results and the final screen, batched on the server so a full room costs about one push a second
+- **Big-screen mode (optional):** the host's screen becomes a projector view (huge question, timer, animated leaderboard) and phones become answer pads
+- **My quizzes:** anyone can build their own quiz with any question type, host it, or share a link so others can host it (they never see the answers)
 - **Leaderboards** (all-time and this week) and a personal match history
 - **Admin panel:** question editor, one-click trivia import from Open Trivia DB, promote or ban users (a ban kicks them out of live games instantly), usage stats
 - **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP sign-up and failed-login limits (sized for a whole classroom on one Wi-Fi), API Gateway throttling, least-privilege IAM roles
@@ -28,7 +35,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
                  └── WSS ────► API Gateway WebSocket API                              ▼
                                  $connect    ──► Lambda: ws-connect           Amazon DynamoDB
                                  $default    ──► Lambda: ws-message  ──────►  Users · Questions
-                                 $disconnect ──► Lambda: ws-disconnect        Games · GamePlay
+                                 $disconnect ──► Lambda: ws-disconnect        Games · GamePlay · Quizzes
                                                     │  ▲                      Connections · Results
                      async invoke at deadline ──────┘  │ PostToConnection     RateLimits
                                  Lambda: game-timer ───┘ (pushes events to every player)
@@ -42,7 +49,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 | **API Gateway WebSocket API** | Persistent connection for gameplay: `$connect` authenticates, `$default` handles game actions, `$disconnect` marks players offline |
 | **API Gateway HTTP API** | REST endpoints for login, leaderboards, history and the admin panel |
 | **AWS Lambda** | Five Node.js 22 functions on arm64: `api`, `ws-connect`, `ws-message`, `ws-disconnect`, `game-timer` |
-| **Amazon DynamoDB** | Seven on-demand tables. TTL cleans up old games, game-play items, sockets and rate-limit counters |
+| **Amazon DynamoDB** | Eight on-demand tables (Quizzes holds the quizzes players build). TTL cleans up old games, game-play items, sockets and rate-limit counters |
 | **Amazon S3** | Hosts the static frontend, served over HTTPS |
 | **Amazon CloudWatch** | Logs, alarms, a dashboard and custom metrics in the `Quibble` namespace |
 | **AWS IAM** | Least-privilege execution role per function |

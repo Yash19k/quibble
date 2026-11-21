@@ -140,3 +140,46 @@ export const QUESTIONS = [
   ['Which Dockerfile instruction sets the base image?', ['RUN', 'FROM', 'CMD', 'EXPOSE'], 1, 'DevOps & AI/ML', 20],
   ['What is the difference between a Docker image and a container?', ['An image is a read-only template; a container is a running instance of it', 'They are the same thing', 'A container is the template; an image is what runs', 'Images only run on AWS'], 0, 'DevOps & AI/ML', 20],
 ];
+
+// Questions of the other types (lib/qtypes.js), in the same categories.
+export const TYPED_QUESTIONS = [
+  // True or false (correctIndex 0 = True, 1 = False)
+  { type: 'truefalse', text: 'Lightning never strikes the same place twice.', correctIndex: 1, category: 'Science', timeLimit: 10 },
+  { type: 'truefalse', text: 'Octopuses have three hearts.', correctIndex: 0, category: 'Science', timeLimit: 10 },
+  { type: 'truefalse', text: 'The Great Wall of China is visible from the Moon with the naked eye.', correctIndex: 1, category: 'History', timeLimit: 10 },
+  { type: 'truefalse', text: 'Australia is wider than the Moon.', correctIndex: 0, category: 'World Geography', timeLimit: 10 },
+  { type: 'truefalse', text: 'JavaScript and Java are the same language.', correctIndex: 1, category: 'Technology', timeLimit: 10 },
+  { type: 'truefalse', text: 'An Amazon S3 bucket name must be unique across all AWS accounts.', correctIndex: 0, category: 'AWS Fundamentals', timeLimit: 10 },
+  { type: 'truefalse', text: 'A cricket match can end in a tie.', correctIndex: 0, category: 'Sports', timeLimit: 10 },
+  { type: 'truefalse', text: 'Bananas grow on trees.', correctIndex: 1, category: 'Science', timeLimit: 10 },
+  // Type it (several accepted spellings; small typos are forgiven)
+  { type: 'type', text: 'What is the chemical symbol for gold?', answers: ['Au'], category: 'Science', timeLimit: 20 },
+  { type: 'type', text: 'Which planet is closest to the Sun?', answers: ['Mercury'], category: 'Science', timeLimit: 20 },
+  { type: 'type', text: 'What is the capital city of Australia?', answers: ['Canberra'], category: 'World Geography', timeLimit: 20 },
+  { type: 'type', text: 'Who painted the Mona Lisa?', answers: ['Leonardo da Vinci', 'Da Vinci', 'Leonardo'], category: 'History', timeLimit: 20 },
+  { type: 'type', text: 'What does the "S" in HTTPS stand for?', answers: ['Secure'], category: 'Technology', timeLimit: 20 },
+  { type: 'type', text: 'Which AWS service runs code without servers, billed per request?', answers: ['Lambda', 'AWS Lambda'], category: 'AWS Fundamentals', timeLimit: 20 },
+  { type: 'type', text: 'How many players does a football (soccer) team have on the pitch?', answers: ['11', 'eleven'], category: 'Sports', timeLimit: 20 },
+  { type: 'type', text: 'Which wizarding school does Harry Potter attend?', answers: ['Hogwarts'], category: 'Entertainment', timeLimit: 20 },
+  // Put in order (items are listed in the RIGHT order; players see them shuffled)
+  { type: 'order', text: 'Order these planets from closest to farthest from the Sun.', items: ['Mercury', 'Earth', 'Jupiter', 'Neptune'], category: 'Science', timeLimit: 25 },
+  { type: 'order', text: 'Put these events in chronological order (oldest first).', items: ['Fall of the Western Roman Empire', 'Columbus reaches the Americas', 'French Revolution', 'First Moon landing'], category: 'History', timeLimit: 30 },
+  { type: 'order', text: 'Order these countries by area, largest first.', items: ['Russia', 'Canada', 'India', 'France'], category: 'World Geography', timeLimit: 25 },
+  { type: 'order', text: 'Order these units from smallest to largest.', items: ['Kilobyte', 'Megabyte', 'Gigabyte', 'Terabyte'], category: 'Technology', timeLimit: 20 },
+  { type: 'order', text: 'Put the stages of a request through a typical serverless API in order.', items: ['Client sends HTTPS request', 'API Gateway receives it', 'Lambda function runs', 'DynamoDB is read or written'], category: 'AWS Fundamentals', timeLimit: 25 },
+  { type: 'order', text: 'Order these Olympic host cities by year, earliest first.', items: ['Athens 1896', 'Berlin 1936', 'Sydney 2000', 'Tokyo 2020'], category: 'Sports', timeLimit: 25 },
+  // Closest number (exact or within the tolerance = right; close guesses still earn points)
+  { type: 'number', text: 'How many bones are in the adult human body?', answer: 206, tolerance: 0, category: 'Science', timeLimit: 20 },
+  { type: 'number', text: 'In what year did the Titanic sink?', answer: 1912, tolerance: 0, category: 'History', timeLimit: 20 },
+  { type: 'number', text: 'How tall is Mount Everest, in metres?', answer: 8849, tolerance: 50, unit: 'm', category: 'World Geography', timeLimit: 25 },
+  { type: 'number', text: 'How many keys does a standard piano have?', answer: 88, tolerance: 0, category: 'Entertainment', timeLimit: 20 },
+  { type: 'number', text: 'How many bits are in a byte?', answer: 8, tolerance: 0, category: 'Technology', timeLimit: 15 },
+  { type: 'number', text: 'What is the maximum timeout of an AWS Lambda function, in minutes?', answer: 15, tolerance: 0, unit: 'min', category: 'AWS Fundamentals', timeLimit: 20 },
+  { type: 'number', text: 'How long is a marathon, in kilometres?', answer: 42.195, tolerance: 0.5, unit: 'km', category: 'Sports', timeLimit: 20 },
+];
+
+/** Every sample question as a question object (the multiple-choice tuples above plus TYPED_QUESTIONS). */
+export const seedQuestions = () => [
+  ...QUESTIONS.map(([text, options, correctIndex, category, timeLimit]) => ({ type: 'choice', text, options, correctIndex, category, timeLimit })),
+  ...TYPED_QUESTIONS,
+];

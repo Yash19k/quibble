@@ -6,18 +6,11 @@ import { DeleteCommand, GetCommand, PutCommand, BatchWriteCommand } from '@aws-s
 import { ddb, scanAll, isConditionFailed, nowIso, sleep } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
+import { cleanQuestion, typeOf, TYPES } from './qtypes.js';
 
 const CACHE_TTL_MS = 30_000;
 
-export const mapQuestion = (q) => ({
-  id: q.id,
-  text: q.text,
-  options: q.options,
-  correctIndex: q.correctIndex,
-  category: q.category,
-  timeLimit: q.timeLimit,
-  createdAt: q.createdAt,
-});
+export const mapQuestion = (q) => ({ id: q.id, ...cleanQuestion(q), createdAt: q.createdAt });
 
 /**
  * Caches what `load()` resolves to for `ttlMs`. Concurrent callers share one in-flight load (single-flight) and
@@ -69,6 +62,17 @@ export async function categories() {
   return [...counts].map(([category, count]) => ({ category, count })).sort((a, b) => a.category.localeCompare(b.category));
 }
 
+/** How many questions of each type the bank holds, per category: [{ type, count, byCategory: {cat: n} }]. */
+export async function typeCounts() {
+  const out = new Map(TYPES.map((t) => [t, { type: t, count: 0, byCategory: {} }]));
+  for (const q of await listQuestions()) {
+    const t = out.get(typeOf(q));
+    t.count += 1;
+    t.byCategory[q.category] = (t.byCategory[q.category] || 0) + 1;
+  }
+  return [...out.values()];
+}
+
 /** `count` distinct items in random order (partial Fisher-Yates on a copy; the input is left alone). */
 export function sample(items, count) {
   const pool = [...items];
@@ -80,10 +84,14 @@ export function sample(items, count) {
   return pool.slice(0, n);
 }
 
-/** Random sample of `count` questions from the given categories (a name, a list, or empty for all). */
-export async function pickRandom(categories, count) {
+/**
+ * Random sample of `count` questions from the given categories (a name, a list, or empty for all), of the given
+ * types (empty or missing for every type).
+ */
+export async function pickRandom(categories, count, types) {
   const wanted = new Set([categories ?? []].flat().filter(Boolean));
-  const matching = (list) => list.filter((q) => !wanted.size || wanted.has(q.category));
+  const kinds = new Set(types ?? []);
+  const matching = (list) => list.filter((q) => (!wanted.size || wanted.has(q.category)) && (!kinds.size || kinds.has(typeOf(q))));
   let pool = matching(await listQuestions());
   // Writes only clear the cache of the container that made them: questions an admin just added through the API
   // aren't in this container's copy yet. Re-read before handing out fewer questions than asked for.
@@ -92,7 +100,7 @@ export async function pickRandom(categories, count) {
 }
 
 export async function createQuestion(data, userId) {
-  const item = { id: crypto.randomUUID(), ...data, createdBy: userId, createdAt: nowIso() };
+  const item = { id: crypto.randomUUID(), ...cleanQuestion(data), createdBy: userId, createdAt: nowIso() };
   await changing(() => ddb.send(new PutCommand({ TableName: env.questionsTable, Item: item })));
   return mapQuestion(item);
 }
@@ -100,7 +108,9 @@ export async function createQuestion(data, userId) {
 export async function updateQuestion(id, data) {
   const res = await ddb.send(new GetCommand({ TableName: env.questionsTable, Key: { id }, ConsistentRead: true }));
   if (!res.Item) throw new HttpError(404, 'Question not found');
-  const item = { ...res.Item, ...data, id };
+  // A type change must not leave the old type's fields behind (e.g. options on a "type it" question).
+  const { id: _id, createdBy, createdAt } = res.Item;
+  const item = { id, ...cleanQuestion(data), createdBy, createdAt, updatedAt: nowIso() };
   try {
     await changing(() => ddb.send(new PutCommand({ TableName: env.questionsTable, Item: item, ConditionExpression: 'attribute_exists(id)' })));
   } catch (err) {
@@ -139,7 +149,7 @@ export async function insertMany(questions, userId) {
     const k = q.text.trim().toLowerCase();
     if (existing.has(k)) continue;
     existing.add(k);
-    added.push({ id: crypto.randomUUID(), ...q, createdBy: userId ?? null, createdAt: nowIso() });
+    added.push({ id: crypto.randomUUID(), ...cleanQuestion(q), createdBy: userId ?? null, createdAt: nowIso() });
   }
   await changing(async () => {
     for (let i = 0; i < added.length; i += 25) await putBatch(added.slice(i, i + 25));

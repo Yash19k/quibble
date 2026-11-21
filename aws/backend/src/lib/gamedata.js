@@ -7,6 +7,7 @@
 //     <code>#B / B          claims {lobbyDue, unstickUntil} <code>#P / <userId> member {seat, presenter, conns}
 //     <code>#Q / <k>        question gate                   <code>#A#<k> / <seat> one answer to question k
 //     <code>#S / S          cumulative scores               <code>#R / <k>      result of question k
+//     <code>#E<n> / E       emoji reaction counters (n = shard 0-3), taken and reset by each reactions push
 //   Every GamePlay item carries expiresAt (TTL, ~1 day).
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { unmarshall } from '@aws-sdk/util-dynamodb';
@@ -32,7 +33,10 @@ export const keys = {
   answer: (code, k, seat) => ({ pk: `${code}#A#${k}`, sk: String(seat) }),
   scores: (code) => ({ pk: `${code}#S`, sk: 'S' }),
   result: (code, k) => ({ pk: `${code}#R`, sk: String(k) }),
+  // Emoji reaction counters, spread over a few partition keys so a room tapping at once never hits one key.
+  reactions: (code, shard) => ({ pk: `${code}#E${shard}`, sk: 'E' }),
 };
+export const REACTION_SHARDS = 4;
 
 /** TTL value (epoch seconds) `days` from `now`. */
 export const ttlAfterDays = (days, now = Date.now()) => Math.floor(now / 1000) + Math.round(days * 86400);

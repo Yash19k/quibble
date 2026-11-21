@@ -1,4 +1,5 @@
 import { api, el, clear, toast, withPending } from './common.js';
+import { questionEditor, answerSummary, TYPE_LABELS, TYPE_ICONS } from './qeditor.js';
 
 const app = document.getElementById('app');
 let tab = 'stats';
@@ -92,11 +93,12 @@ async function questionsTab(body, search = '') {
       el('button', { onclick: () => questionForm(body, null) }, 'New question')),
     el('div', { class: 'card table-wrap' }, questions.length
       ? el('table', {},
-          el('thead', {}, el('tr', {}, ['Question', 'Category', 'Answer', ''].map((h) => el('th', {}, h)))),
+          el('thead', {}, el('tr', {}, ['Question', 'Type', 'Category', 'Answer', ''].map((h) => el('th', {}, h)))),
           el('tbody', {}, questions.map((x) => el('tr', {},
             el('td', {}, x.text),
+            el('td', { title: TYPE_LABELS[x.type || 'choice'] }, TYPE_ICONS[x.type || 'choice']),
             el('td', {}, el('span', { class: 'pill' }, x.category)),
-            el('td', {}, x.options[x.correctIndex]),
+            el('td', {}, answerSummary(x)),
             el('td', { class: 'num', style: 'white-space:nowrap' },
               el('button', { class: 'ghost small', onclick: () => questionForm(body, x) }, 'Edit'), ' ',
               el('button', { class: 'danger small', onclick: async (e) => {
@@ -111,21 +113,17 @@ async function questionsTab(body, search = '') {
 }
 
 function questionForm(body, existing) {
-  const text = el('textarea', { rows: 2, maxlength: 300, value: existing?.text || '', 'aria-label': 'Question' });
-  const category = el('input', { maxlength: 40, value: existing?.category || 'General', 'aria-label': 'Category' });
-  const time = el('input', { type: 'number', min: 5, max: 60, value: existing?.timeLimit || 20, 'aria-label': 'Time limit (seconds)' });
-  const opts = [0, 1, 2, 3].map((i) => el('input', { maxlength: 100, placeholder: i < 2 ? `Option ${i + 1} (required)` : `Option ${i + 1} (optional)`, value: existing?.options[i] || '', 'aria-label': `Option ${i + 1}` }));
-  const radios = [0, 1, 2, 3].map((i) => el('input', { type: 'radio', name: 'correct', value: i, checked: (existing?.correctIndex ?? 0) === i, 'aria-label': `Option ${i + 1} is correct` }));
+  const editor = questionEditor(existing);
   const error = el('div', { class: 'error', role: 'alert' });
-
   const save = el('button', { onclick: () => withPending(save, 'Saving…', async () => {
     error.textContent = '';
-    // Keep only non-empty options and re-map which one is correct.
-    const filled = opts.map((o, i) => ({ v: o.value.trim(), i })).filter((o) => o.v);
-    const correct = radios.findIndex((r) => r.checked);
-    const correctIndex = filled.findIndex((o) => o.i === correct);
-    if (correctIndex < 0) return (error.textContent = 'The correct answer must not be empty.');
-    const payload = { text: text.value, options: filled.map((o) => o.v), correctIndex, category: category.value, timeLimit: Number(time.value) };
+    let payload;
+    try {
+      payload = editor.read();
+    } catch (e) {
+      error.textContent = e.message;
+      return;
+    }
     try {
       await api(existing ? `/api/admin/questions/${existing.id}` : '/api/admin/questions', { method: existing ? 'PUT' : 'POST', body: payload });
       toast('Saved');
@@ -135,14 +133,12 @@ function questionForm(body, existing) {
 
   clear(body).append(el('div', { class: 'card' },
     el('h3', {}, existing ? 'Edit question' : 'New question'),
-    el('label', {}, 'Question'), text,
-    el('label', {}, 'Answers (select the correct one)'),
-    opts.map((o, i) => el('div', { class: 'opt-row' }, radios[i], o)),
-    el('div', { class: 'grid2' }, el('div', {}, el('label', {}, 'Category'), category), el('div', {}, el('label', {}, 'Time limit (seconds)'), time)),
+    editor.node,
     error,
     el('div', { class: 'row', style: 'margin-top:12px' },
       save,
       el('button', { class: 'ghost', onclick: () => questionsTab(body) }, 'Cancel'))));
+  editor.focus();
 }
 
 async function importTriviaModal(body) {

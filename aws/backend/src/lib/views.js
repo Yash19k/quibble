@@ -3,11 +3,12 @@
 //   header  GamesTable item {code, status, version, hostId, total, qIndex, playerCount, endsAt, acceptUntil, ...}
 //   member  {userId, username, seat, presenter, conns: Set<connectionId>}
 //   gate    {k, startedAt, endsAt, acceptUntil, correctIndex, optionCount, timeLimitMs, expected, answered, seats: Set<seat>}
-//   scores  {"<seat>": [score, correctCount, lastGain]}
-// Never put a question's correctIndex into anything shown before its reveal.
-import { calculateScore, rankPlayers } from './scoring.js';
+//   scores  {"<seat>": [score, correctCount, lastGain, streak, bestStreak, lastBonus]}
+// Never put a question's answer key (correctIndex, correctOrder, answers, answer) into anything shown before its reveal.
+import { calculateScore, rankPlayers, streakBonus } from './scoring.js';
+import * as Q from './qtypes.js';
 
-export const PROTOCOL = 2;
+export const PROTOCOL = 3;
 export const LOBBY_LIST_SIZE = 24; // players (not the host) see this many of the most recent joiners
 export const TOP_N = 10;
 export const STUCK_MS = 8000; // a phase this far past its deadline lost its timer: the next visitor un-sticks it
@@ -61,6 +62,8 @@ const gameInfo = (h) => ({
   hostPlays: !!h.hostPlays,
   category: h.category ?? null,
   total: h.total,
+  bigScreen: !!h.bigScreen,
+  quizTitle: h.quizTitle ?? null,
 });
 
 // ---------- lobby ----------
@@ -90,11 +93,9 @@ export function roomState(header, members, { all = false } = {}) {
 export function questionShow(header, question, timing, serverNow) {
   return {
     ...tag(header),
+    ...Q.publicQuestion(question),
     index: timing.k,
     total: header.total,
-    text: question.text,
-    options: question.options,
-    timeLimit: question.timeLimit,
     endsAt: timing.endsAt,
     acceptUntil: timing.acceptUntil,
     serverNow,
@@ -106,72 +107,141 @@ export function questionShow(header, question, timing, serverNow) {
 export const answerCount = (header, k, answered) => ({ ...tag(header), index: k, answered, total: header.playerCount });
 
 // ---------- scoring ----------
+/** A seat's entry of the scores item: [score, correctCount, lastGain, streak, bestStreak, lastBonus]. */
+export function scoreTuple(scores, seat) {
+  const [score = 0, correctCount = 0, lastGain = 0, streak = 0, bestStreak = 0, lastBonus = 0] = scores?.[seat] ?? [];
+  return { score, correctCount, lastGain, streak, bestStreak, lastBonus };
+}
+
 /** Every roster player as a leaderboard row (with `seat`), best first, competition-ranked (ties share a rank). */
 export function rankRows(roster, scores = {}) {
   const rows = roster.map((m) => {
-    const [score = 0, correctCount = 0, lastGain = 0] = scores?.[m.seat] ?? [];
-    return { seat: m.seat, userId: m.userId, username: m.username, score, correctCount, lastGain };
+    const t = scoreTuple(scores, m.seat);
+    return {
+      seat: m.seat, userId: m.userId, username: m.username,
+      score: t.score, correctCount: t.correctCount, lastGain: t.lastGain, streak: t.streak, bestStreak: t.bestStreak,
+    };
   });
   return rankPlayers(rows);
 }
 
-/** The row as sent to browsers. */
+/** The row as sent to browsers. `move` = places climbed with the last question (negative = dropped). */
 export const publicRow = (r) =>
-  r ? { userId: r.userId, username: r.username, score: r.score, correctCount: r.correctCount, lastGain: r.lastGain, rank: r.rank } : null;
+  r
+    ? {
+        userId: r.userId, username: r.username, score: r.score, correctCount: r.correctCount, lastGain: r.lastGain,
+        rank: r.rank, streak: r.streak ?? 0, ...(r.move !== undefined ? { move: r.move } : {}),
+      }
+    : null;
 
 /**
  * Scores question k. `answers` are the answer items whose seat the gate counted; `roster` the players now in the game;
  * `prevScores` the cumulative scores before k. Returns the new cumulative scores (every roster seat), the ranked board
  * and the result item for k. Answers from seats no longer in the roster (kicked) still count in the option totals.
+ *
+ * Points: a right answer earns 500-1000 for speed, a close miss (order / number questions) up to PARTIAL_MAX, both
+ * doubled on a double-points question. On top, a streak bonus for 3+ right answers in a row (never doubled).
  */
 export function scoreQuestion({ k, question, gate, answers, roster, prevScores = {}, playerCount }) {
+  const type = Q.typeOf(question);
+  const tap = Q.isTapType(type);
   const bySeat = new Map(answers.map((a) => [Number(a.seat), a]));
   const scores = {};
+  const marks = {}; // seat -> 1 right, 2 partly right, 0 wrong (answered seats only)
+  const mult = question.double ? 2 : 1;
   for (const m of roster) {
-    const [score = 0, correctCount = 0] = prevScores?.[m.seat] ?? [];
+    const prev = scoreTuple(prevScores, m.seat);
     const a = bySeat.get(m.seat);
-    const correct = !!a && a.choice === gate.correctIndex;
+    const { correct, partial } = Q.judge(question, a);
     // Time is measured from API Gateway's arrival stamp, so a slow Lambda never costs a player points.
     const elapsedMs = a ? clamp(a.at - gate.startedAt, 0, gate.timeLimitMs) : 0;
-    const gained = a ? calculateScore({ correct, elapsedMs, timeLimitMs: gate.timeLimitMs }) : 0;
-    scores[m.seat] = [score + gained, correctCount + (correct ? 1 : 0), gained];
+    let base = 0;
+    if (a && correct) base = calculateScore({ correct, elapsedMs, timeLimitMs: gate.timeLimitMs });
+    else if (a) base = Math.round(Q.PARTIAL_MAX * partial);
+    const streak = correct ? prev.streak + 1 : 0;
+    const bonus = correct ? streakBonus(streak) : 0;
+    const gained = base * mult + bonus;
+    scores[m.seat] = [prev.score + gained, prev.correctCount + (correct ? 1 : 0), gained, streak, Math.max(prev.bestStreak, streak), bonus];
+    if (a) marks[m.seat] = correct ? 1 : base > 0 ? 2 : 0;
   }
-  const optionCounts = Array.from({ length: gate.optionCount }, () => 0);
+  const optionCounts = tap ? Array.from({ length: gate.optionCount }, () => 0) : [];
   const choices = {};
+  let rightCount = 0;
   for (const a of answers) {
-    if (a.choice >= 0 && a.choice < optionCounts.length) optionCounts[a.choice] += 1;
-    choices[a.seat] = a.choice;
+    if (tap) {
+      if (a.choice >= 0 && a.choice < optionCounts.length) optionCounts[a.choice] += 1;
+      choices[a.seat] = a.choice;
+    } else {
+      choices[a.seat] = a.answer;
+    }
+    if (marks[a.seat] === undefined) marks[a.seat] = Q.judge(question, a).correct ? 1 : 0; // a seat no longer in the roster
+    if (marks[a.seat] === 1) rightCount += 1;
   }
-  const board = rankRows(roster, scores);
+  const names = new Map(roster.map((m) => [m.seat, m.username]));
+  const prevRank = new Map(rankRows(roster, prevScores).map((r) => [r.seat, r.rank]));
+  const board = rankRows(roster, scores).map((r) => ({ ...r, move: (prevRank.get(r.seat) ?? r.rank) - r.rank }));
+
+  let fastest = null;
+  for (const a of answers) {
+    const seat = Number(a.seat);
+    if (marks[a.seat] !== 1 || !names.has(seat)) continue;
+    const ms = clamp(a.at - gate.startedAt, 0, gate.timeLimitMs);
+    if (!fastest || ms < fastest.ms) fastest = { username: names.get(seat), ms };
+  }
+  const climb = k > 0 ? board.filter((r) => r.move > 0).sort((x, y) => y.move - x.move || x.rank - y.rank)[0] : null;
   return {
     scores,
     board,
     result: {
       k,
-      correctIndex: gate.correctIndex,
+      type,
+      double: !!question.double,
+      correctIndex: tap ? gate.correctIndex : -1,
+      correctOrder: question.correctOrder ?? null,
+      answerText: Q.answerText(question),
       text: question.text,
-      options: question.options,
+      options: question.options ?? [],
+      unit: question.unit || '',
       optionCounts,
       answeredCount: answers.length,
+      rightCount,
       playerCount,
       top10: board.slice(0, TOP_N).map(publicRow),
       choices,
+      marks,
+      fastest,
+      climber: climb ? { username: climb.username, move: climb.move, rank: climb.rank } : null,
+      summary: Q.summarize(question, answers, (seat) => names.get(Number(seat))),
     },
   };
 }
 
 /** A player's row straight from the scores item: rank = 1 + players with a strictly higher score. */
 export function rowFromScores(scores, member) {
-  const [score = 0, correctCount = 0, lastGain = 0] = scores?.[member.seat] ?? [];
-  const higher = Object.values(scores ?? {}).filter((s) => s[0] > score).length;
-  return { userId: member.userId, username: member.username, score, correctCount, lastGain, rank: higher + 1 };
+  const t = scoreTuple(scores, member.seat);
+  const higher = Object.values(scores ?? {}).filter((s) => s[0] > t.score).length;
+  return {
+    userId: member.userId, username: member.username, score: t.score, correctCount: t.correctCount,
+    lastGain: t.lastGain, streak: t.streak, rank: higher + 1,
+  };
 }
 
-/** What this seat answered at question `result.k`, or null if it didn't answer. */
+/** What this seat answered at question `result.k` (and how it went), or null if it didn't answer. */
 export function myChoiceFor(result, scores, seat) {
   const choice = result?.choices?.[seat];
   if (choice === undefined || choice === null) return null;
-  return { choice, correct: choice === result.correctIndex, gained: scores?.[seat]?.[2] ?? 0 };
+  const tap = !result.type || Q.isTapType(result.type);
+  const mark = result.marks?.[seat] ?? (choice === result.correctIndex ? 1 : 0);
+  const t = scoreTuple(scores, seat);
+  return {
+    choice: tap ? choice : null,
+    answer: tap ? null : choice,
+    correct: mark === 1,
+    partial: mark === 2,
+    gained: t.lastGain,
+    bonus: t.lastBonus,
+    streak: t.streak,
+  };
 }
 
 /** me + myChoice for one viewer (a presenter gets nulls). */
@@ -191,11 +261,20 @@ export function questionResult(header, result, { me = null, myChoice = null, ser
     ...tag(header),
     index: result.k,
     total: header.total,
+    type: result.type ?? 'choice',
+    double: !!result.double,
     text: result.text,
     options: result.options,
+    unit: result.unit ?? '',
     correctIndex: result.correctIndex,
+    correctOrder: result.correctOrder ?? null,
+    answerText: result.answerText ?? result.options?.[result.correctIndex] ?? '',
     optionCounts: result.optionCounts,
     answeredCount: result.answeredCount,
+    rightCount: result.rightCount ?? null,
+    fastest: result.fastest ?? null,
+    climber: result.climber ?? null,
+    summary: result.summary ?? {},
     playerCount: result.playerCount,
     revealEndsAt: header.revealEndsAt,
     serverNow,
@@ -211,7 +290,18 @@ export const gameEnd = (header, leaderboard, me = null) => ({
   playerCount: header.playerCount,
   leaderboard,
   me,
+  awards: header.awards ?? null,
 });
+
+/** Fun facts for the final screen, from the final ranked board. */
+export function awardsOf(board) {
+  const streak = [...board].sort((a, b) => (b.bestStreak ?? 0) - (a.bestStreak ?? 0) || a.rank - b.rank)[0];
+  const sharp = [...board].sort((a, b) => b.correctCount - a.correctCount || a.rank - b.rank)[0];
+  return {
+    streak: streak && streak.bestStreak >= 3 ? { username: streak.username, n: streak.bestStreak } : null,
+    sharp: sharp && sharp.correctCount > 0 ? { username: sharp.username, n: sharp.correctCount } : null,
+  };
+}
 
 /** game:cancelled. */
 export const gameCancelled = (header) => ({ ...tag(header), reason: header.cancelReason || 'The game was cancelled.' });

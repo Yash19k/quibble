@@ -2,7 +2,7 @@
 // Creating a game, listing categories and the admin panel all need the whole (small) table, so reads go through a
 // short per-container cache: a crowd hitting the API at once costs one Scan per warm Lambda, not one per request.
 import crypto from 'node:crypto';
-import { DeleteCommand, GetCommand, PutCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, GetCommand, PutCommand, BatchWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ddb, scanAll, isConditionFailed, nowIso, sleep } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
@@ -130,8 +130,9 @@ export async function deleteQuestion(id) {
 }
 
 // BatchWrite may hand back "unprocessed" items under load: retry those with full-jitter backoff, then give up loudly.
-async function putBatch(items) {
-  let requests = items.map((Item) => ({ PutRequest: { Item } }));
+const putBatch = (items) => writeBatch(items.map((Item) => ({ PutRequest: { Item } })));
+
+async function writeBatch(requests) {
   for (let attempt = 0; requests.length; attempt++) {
     if (attempt === 6) throw new HttpError(503, 'Server busy, please try again.');
     if (attempt) await sleep(Math.random() * Math.min(2000, 100 * 2 ** attempt));
@@ -155,4 +156,35 @@ export async function insertMany(questions, userId) {
     for (let i = 0; i < added.length; i += 25) await putBatch(added.slice(i, i + 25));
   });
   return added.length;
+}
+
+/** Admin: delete many questions at once. Returns how many of the ids existed. Safe to retry. */
+export async function deleteMany(ids) {
+  const unique = [...new Set(ids)];
+  const known = new Set((await listQuestions({ fresh: true })).map((q) => q.id));
+  const doomed = unique.filter((id) => known.has(id));
+  await changing(async () => {
+    for (let i = 0; i < doomed.length; i += 25) {
+      await writeBatch(doomed.slice(i, i + 25).map((id) => ({ DeleteRequest: { Key: { id } } })));
+    }
+  });
+  return doomed.length;
+}
+
+/** Admin: move every question of category `from` to `to` (a rename, or a merge when `to` exists). Returns the count. */
+export async function renameCategory(from, to) {
+  const moving = (await listQuestions({ fresh: true })).filter((q) => q.category === from);
+  await changing(async () => {
+    for (let i = 0; i < moving.length; i += 10) {
+      await Promise.all(moving.slice(i, i + 10).map((q) => ddb.send(new UpdateCommand({
+        TableName: env.questionsTable,
+        Key: { id: q.id },
+        UpdateExpression: 'SET #cat = :to, #upd = :now',
+        ConditionExpression: 'attribute_exists(id)',
+        ExpressionAttributeNames: { '#cat': 'category', '#upd': 'updatedAt' },
+        ExpressionAttributeValues: { ':to': to, ':now': nowIso() },
+      })).catch((err) => { if (!isConditionFailed(err)) throw err; }))); // deleted meanwhile: nothing to move
+    }
+  });
+  return moving.length;
 }

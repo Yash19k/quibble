@@ -2,8 +2,8 @@
 //   { id, ownerId, ownerName, title, description, shared, questions: [...], questionCount, createdAt, updatedAt }
 // A quiz is private to its owner unless `shared`: then anyone with its link can host it (but never read its answers).
 import crypto from 'node:crypto';
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { ddb, isConditionFailed, nowIso } from './db.js';
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { ddb, scanAll, isConditionFailed, nowIso } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
 
@@ -78,6 +78,46 @@ export async function updateQuiz(user, id, data) {
     throw err;
   }
   return item;
+}
+
+// ---------- admin moderation ----------
+/** Every quiz, without its questions (admin list). */
+export async function listAllQuizzes() {
+  const fields = ['id', 'title', 'description', 'shared', 'ownerId', 'ownerName', 'questionCount', 'createdAt', 'updatedAt'];
+  return scanAll({
+    TableName: env.quizzesTable,
+    ProjectionExpression: fields.map((f) => `#${f}`).join(', '),
+    ExpressionAttributeNames: Object.fromEntries(fields.map((f) => [`#${f}`, f])),
+  });
+}
+
+/** Admin: stop (or allow) sharing someone's quiz. */
+export async function setShared(id, shared) {
+  try {
+    const res = await ddb.send(new UpdateCommand({
+      TableName: env.quizzesTable, Key: { id },
+      UpdateExpression: 'SET #shared = :s', ConditionExpression: 'attribute_exists(id)',
+      ExpressionAttributeNames: { '#shared': 'shared' }, // a reserved word
+      ExpressionAttributeValues: { ':s': shared }, ReturnValues: 'ALL_NEW',
+    }));
+    return res.Attributes;
+  } catch (err) {
+    if (isConditionFailed(err)) throw new HttpError(404, 'Quiz not found');
+    throw err;
+  }
+}
+
+/** Admin: delete anyone's quiz. Returns the deleted item. */
+export async function adminDeleteQuiz(id) {
+  try {
+    const res = await ddb.send(new DeleteCommand({
+      TableName: env.quizzesTable, Key: { id }, ConditionExpression: 'attribute_exists(id)', ReturnValues: 'ALL_OLD',
+    }));
+    return res.Attributes;
+  } catch (err) {
+    if (isConditionFailed(err)) throw new HttpError(404, 'Quiz not found');
+    throw err;
+  }
 }
 
 export async function deleteQuiz(user, id) {

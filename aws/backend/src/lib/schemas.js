@@ -75,8 +75,29 @@ export const userPatchSchema = z
   .object({
     role: z.enum(['player', 'admin']).optional(),
     banned: z.boolean().optional(),
+    banReason: z.string().trim().max(200).optional(), // shown in the admin panel only
+    username: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/, 'must be 3-20 letters, numbers or underscores').optional(),
   })
-  .refine((v) => v.role !== undefined || v.banned !== undefined, { message: 'nothing to update' });
+  .refine((v) => v.role !== undefined || v.banned !== undefined || v.username !== undefined, { message: 'nothing to update' });
+
+// ---------- admin panel ----------
+export const idListSchema = z.object({ ids: z.array(z.string().trim().min(1).max(64)).min(1).max(500) });
+
+/** Questions are validated one by one (questionSchema) so an error can name the question. */
+export const questionImportSchema = z.object({ questions: z.array(z.unknown()).min(1).max(500) });
+
+export const categoryRenameSchema = z
+  .object({ from: z.string().trim().min(1).max(40), to: z.string().trim().min(1).max(40) })
+  .refine((v) => v.from !== v.to, { message: 'pick a different name', path: ['to'] });
+
+export const quizPatchSchema = z.object({ shared: z.boolean() });
+
+export const gameEndSchema = z.object({ reason: z.string().trim().max(120).optional() });
+
+export const announcementSchema = z.object({
+  text: z.string().trim().min(3).max(280),
+  tone: z.enum(['info', 'warn']).default('info'),
+});
 
 export const triviaImportSchema = z.object({
   amount: z.coerce.number().int().min(1).max(50).default(10),

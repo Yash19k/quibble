@@ -16,6 +16,12 @@ const unameKey = (username) => ({ pk: `UNAME#${username.trim().toLowerCase()}` }
 
 export const publicUser = (u) => ({ id: u.id, email: u.email, username: u.username, role: u.role });
 
+/**
+ * Was this token signed before an admin signed the user out everywhere? Tokens carry the user's session version
+ * (`sv`, absent = 0) and every sign-out bumps it, so exactly the tokens issued before it stop working.
+ */
+export const tokenRevoked = (user, sv) => (sv ?? 0) !== (user?.sessionVersion ?? 0);
+
 const reasonCode = (err, i) => err?.CancellationReasons?.[i]?.Code;
 
 /**
@@ -26,7 +32,8 @@ const reasonCode = (err, i) => err?.CancellationReasons?.[i]?.Code;
 export async function createUser({ email, username, passwordHash, role = 'player' }) {
   for (let attempt = 0; ; attempt++) {
     const id = crypto.randomUUID();
-    const user = { ...userKey(id), type: 'user', id, email, username, passwordHash, role, banned: false, createdAt: nowIso() };
+    const createdAt = nowIso();
+    const user = { ...userKey(id), type: 'user', id, email, username, passwordHash, role, banned: false, createdAt, lastLoginAt: createdAt };
     try {
       await ddb.send(new TransactWriteCommand({
         TransactItems: [
@@ -78,19 +85,34 @@ export async function listUsers() {
   });
 }
 
-/** Admin: change role and/or banned flag. */
-export async function updateUser(id, { role, banned }) {
+/**
+ * Admin: change role and/or banned flag. A ban records why, when and by whom (banReason, bannedAt, bannedBy); an unban
+ * clears them again.
+ */
+export async function updateUser(id, { role, banned, banReason, bannedBy }) {
   const sets = [];
+  const removes = [];
+  const names = {};
   const values = {};
-  if (role !== undefined) { sets.push('#r = :r'); values[':r'] = role; }
-  if (banned !== undefined) { sets.push('banned = :b'); values[':b'] = banned; }
+  if (role !== undefined) { sets.push('#r = :r'); names['#r'] = 'role'; values[':r'] = role; }
+  if (banned === true) {
+    sets.push('banned = :b', 'bannedAt = :at');
+    values[':b'] = true;
+    values[':at'] = nowIso();
+    if (banReason) { sets.push('banReason = :why'); values[':why'] = banReason; } else removes.push('banReason');
+    if (bannedBy) { sets.push('bannedBy = :by'); values[':by'] = bannedBy; }
+  } else if (banned === false) {
+    sets.push('banned = :b');
+    values[':b'] = false;
+    removes.push('banReason', 'bannedAt', 'bannedBy');
+  }
   try {
     const res = await ddb.send(new UpdateCommand({
       TableName: env.usersTable,
       Key: userKey(id),
-      UpdateExpression: `SET ${sets.join(', ')}`,
+      UpdateExpression: `SET ${sets.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`,
       ConditionExpression: 'attribute_exists(pk)',
-      ExpressionAttributeNames: role !== undefined ? { '#r': 'role' } : undefined,
+      ExpressionAttributeNames: Object.keys(names).length ? names : undefined,
       ExpressionAttributeValues: values,
       ReturnValues: 'ALL_NEW',
     }));
@@ -99,6 +121,94 @@ export async function updateUser(id, { role, banned }) {
     if (isConditionFailed(err)) throw new HttpError(404, 'User not found');
     throw err;
   }
+}
+
+/** A successful login, shown in the admin panel's "Last login" column. */
+export async function touchLogin(id) {
+  await ddb.send(new UpdateCommand({
+    TableName: env.usersTable,
+    Key: userKey(id),
+    UpdateExpression: 'SET lastLoginAt = :now',
+    ConditionExpression: 'attribute_exists(pk)',
+    ExpressionAttributeValues: { ':now': nowIso() },
+  }));
+}
+
+/**
+ * Admin: rename a user. The username guard is swapped in the same transaction, so a taken name -> 409 and nothing
+ * changes. A change of capitals only keeps the (case-insensitive) guard.
+ */
+export async function renameUser(id, username) {
+  const user = await getUserById(id, { consistent: true });
+  if (!user) throw new HttpError(404, 'User not found');
+  if (user.username === username) return user;
+  const sameGuard = user.username.trim().toLowerCase() === username.trim().toLowerCase();
+  const setName = {
+    Update: {
+      TableName: env.usersTable,
+      Key: userKey(id),
+      UpdateExpression: 'SET username = :n',
+      ConditionExpression: 'attribute_exists(pk) AND username = :old',
+      ExpressionAttributeValues: { ':n': username, ':old': user.username },
+    },
+  };
+  const items = sameGuard ? [setName] : [
+    { Put: { TableName: env.usersTable, Item: { ...unameKey(username), type: 'guard', userId: id }, ConditionExpression: 'attribute_not_exists(pk)' } },
+    setName,
+    {
+      Delete: {
+        TableName: env.usersTable, Key: unameKey(user.username),
+        ConditionExpression: 'attribute_not_exists(pk) OR userId = :id', ExpressionAttributeValues: { ':id': id },
+      },
+    },
+  ];
+  try {
+    await ddb.send(new TransactWriteCommand({ TransactItems: items }));
+  } catch (err) {
+    if (!sameGuard && reasonCode(err, 0) === 'ConditionalCheckFailed') throw new HttpError(409, 'That username is taken', { field: 'username' });
+    if (err?.name === 'TransactionCanceledException') throw new HttpError(409, 'This user just changed. Reload and try again.');
+    throw err;
+  }
+  return { ...user, username };
+}
+
+/**
+ * Admin: sign the user out on every device (every token issued so far stops working, see tokenRevoked). With
+ * `passwordHash` it also sets a new password: the reset-password flow.
+ */
+export async function revokeSessions(id, { passwordHash } = {}) {
+  const sets = ['sessionsRevokedAt = :now'];
+  const values = { ':now': nowIso(), ':one': 1 };
+  if (passwordHash) {
+    sets.push('passwordHash = :h', 'passwordResetAt = :now');
+    values[':h'] = passwordHash;
+  }
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: env.usersTable,
+      Key: userKey(id),
+      UpdateExpression: `SET ${sets.join(', ')} ADD sessionVersion :one`,
+      ConditionExpression: 'attribute_exists(pk)',
+      ExpressionAttributeValues: values,
+    }));
+  } catch (err) {
+    if (isConditionFailed(err)) throw new HttpError(404, 'User not found');
+    throw err;
+  }
+}
+
+/** Admin: remove the user record and its email / username guards in one transaction. */
+export async function deleteUserRecords(user) {
+  const guard = (Key) => ({
+    Delete: { TableName: env.usersTable, Key, ConditionExpression: 'attribute_not_exists(pk) OR userId = :id', ExpressionAttributeValues: { ':id': user.id } },
+  });
+  await ddb.send(new TransactWriteCommand({
+    TransactItems: [
+      { Delete: { TableName: env.usersTable, Key: userKey(user.id) } },
+      guard(emailKey(user.email)),
+      guard(unameKey(user.username)),
+    ],
+  }));
 }
 
 /** Remember which game a user is in (so a refresh / reconnect puts them back). */

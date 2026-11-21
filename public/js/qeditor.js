@@ -27,7 +27,9 @@ const typeOf = (q) => (q?.type && TYPE_LABELS[q.type] ? q.type : 'choice');
 /** One line describing the right answer (lists, tables). */
 export function answerSummary(q) {
   const t = typeOf(q);
-  if (t === 'choice' || t === 'truefalse') return q.options?.[q.correctIndex] ?? '';
+  // Bank true/false questions loaded by the seed have no stored options: their answer is still True or False.
+  if (t === 'truefalse') return (q.options ?? ['True', 'False'])[q.correctIndex] ?? '';
+  if (t === 'choice') return q.options?.[q.correctIndex] ?? '';
   if (t === 'type') return (q.answers ?? []).join(' / ');
   if (t === 'order') return (q.items ?? []).join(' → ');
   return `${q.answer}${q.unit ? ` ${q.unit}` : ''}${q.tolerance ? ` (±${q.tolerance})` : ''}`;

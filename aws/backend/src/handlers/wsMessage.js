@@ -4,7 +4,7 @@
 //   server  -> { type: 'event', event: 'question:show', data }   (pushes, see lib/game.js)
 // Browsers resend unacknowledged messages, so every action is idempotent.
 import { getConnection } from '../lib/connections.js';
-import { getUserById } from '../lib/users.js';
+import { getUserById, tokenRevoked } from '../lib/users.js';
 import { sendTo, disconnectUser } from '../lib/push.js';
 import { GameError } from '../lib/errors.js';
 import { wsSchemas, parse } from '../lib/schemas.js';
@@ -57,6 +57,12 @@ export const handler = async (event) => {
     if (!user || user.banned) {
       await ack({ ok: false, error: 'unauthorized' });
       if (user) await disconnectUser(user.id);
+      return { statusCode: 200 };
+    }
+    // A socket opened with a token from before an admin's "sign out everywhere" is as dead as that token (only this
+    // socket: the user may already have signed in again elsewhere).
+    if (tokenRevoked(user, conn.tokenSv)) {
+      await ack({ ok: false, error: 'unauthorized' });
       return { statusCode: 200 };
     }
     const ctx = {

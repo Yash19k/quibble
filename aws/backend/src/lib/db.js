@@ -11,7 +11,8 @@ const local = process.env.DYNAMODB_ENDPOINT;
 const agentOptions = { keepAlive: true, maxSockets: 256 };
 export const httpAgents = { httpAgent: new http.Agent(agentOptions), httpsAgent: new https.Agent(agentOptions) };
 
-const client = new DynamoDBClient({
+// The low-level client: table-level calls (DescribeTable for the admin panel). Items go through `ddb` below.
+export const client = new DynamoDBClient({
   ...(local ? { endpoint: local, region: 'local', credentials: { accessKeyId: 'local', secretAccessKey: 'local' } } : {}),
   requestHandler: httpAgents,
   maxAttempts: 6, // throttling and transient errors are retried with backoff by the SDK

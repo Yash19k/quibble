@@ -19,6 +19,8 @@ export const env = {
   get resultsTable() { return required('RESULTS_TABLE'); },
   get rateLimitsTable() { return required('RATE_LIMITS_TABLE'); },
   get quizzesTable() { return required('QUIZZES_TABLE'); },
+  // Admin panel: the audit log of admin actions and site settings (the announcement banner).
+  get adminTable() { return required('ADMIN_TABLE'); },
   get jwtSecret() {
     const s = required('JWT_SECRET');
     if (s.length < 32) throw new Error('JWT_SECRET must be at least 32 characters');

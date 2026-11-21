@@ -7,8 +7,8 @@ import { ddb, isConditionFailed } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
 
-const REGISTER_WINDOW_MS = 60 * 60 * 1000;
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+export const REGISTER_WINDOW_MS = 60 * 60 * 1000;
+export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 /** The fixed window `now` falls in: its index, when it ends (ms) and the whole seconds left until then. */
 export function fixedWindow(now, windowMs) {
@@ -18,7 +18,7 @@ export function fixedWindow(now, windowMs) {
 }
 
 // Hashed so the table never holds the addresses people typed (typos of other people's emails included).
-const emailId = (email) =>
+export const emailId = (email) =>
   crypto.createHash('sha256').update(String(email).trim().toLowerCase()).digest('base64url').slice(0, 24);
 
 /** Keys of the failed-login counters (per IP and per account) for the window `now` falls in. */

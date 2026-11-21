@@ -858,12 +858,17 @@ export async function cancelByHost(user) {
   return {};
 }
 
+/** Admin panel: end a live game (or an expired lobby) for everyone. False if it was already over. */
+export async function forceCancel(code, reason) {
+  return cancel(code, reason || 'An admin ended the game.');
+}
+
 /** Sent by the browser on every socket open (and as `sync` by its watchdog): resync the user with their game. */
 export async function hello(user, data, ctx) {
   if (data?.protocol !== V.PROTOCOL) return { reload: true }; // a tab still running an older app.js
   const out = { user: publicUser(user) };
   const iat = ctx?.conn?.tokenIat;
-  if (!iat || Date.now() / 1000 - iat > TOKEN_REFRESH_S) out.token = signToken(user.id);
+  if (!iat || Date.now() / 1000 - iat > TOKEN_REFRESH_S) out.token = signToken(user.id, user.sessionVersion);
 
   const code = user.currentGame;
   if (!code) return { ...out, inGame: false };

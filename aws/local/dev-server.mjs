@@ -48,6 +48,7 @@ Object.assign(process.env, {
   RESULTS_TABLE: `${PREFIX}results`,
   RATE_LIMITS_TABLE: `${PREFIX}rate-limits`,
   QUIZZES_TABLE: `${PREFIX}quizzes`,
+  ADMIN_TABLE: `${PREFIX}admin`,
   JWT_SECRET: process.env.LOCAL_JWT_SECRET || 'local-dev-only-secret-0123456789abcdef0123456789',
   WS_ENDPOINT: 'http://local',
   TIMER_FUNCTION: 'local-timer',
@@ -80,6 +81,7 @@ const TABLES = [
   },
   { TableName: process.env.RESULTS_TABLE, AttributeDefinitions: [S('userId'), S('sk')], KeySchema: [H('userId'), R('sk')] },
   { TableName: process.env.RATE_LIMITS_TABLE, AttributeDefinitions: [S('key')], KeySchema: [H('key')] },
+  { TableName: process.env.ADMIN_TABLE, AttributeDefinitions: [S('pk'), S('sk')], KeySchema: [H('pk'), R('sk')] },
   {
     TableName: process.env.QUIZZES_TABLE,
     AttributeDefinitions: [S('id'), S('ownerId'), S('updatedAt')],

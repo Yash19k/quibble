@@ -1203,6 +1203,243 @@ test('the bank can be filtered by question type', async (t) => {
   assert.match(none.error, /types/);
 });
 
+/** Polls `fn` until it returns something truthy (a deployment's other Lambda containers cache for up to 15 s). */
+async function eventually(fn, { timeoutMs = 20_000, everyMs = 500 } = {}) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await fn();
+    if (v || Date.now() > until) return v;
+    await sleep(everyMs);
+  }
+}
+
+test('admin console: every route is admin-only; overview, games monitor, force end, game detail', { timeout: 90_000 }, async (t) => {
+  const token = await adminToken();
+  await loadReady();
+  const [hostUser, p1] = await Promise.all([register('adhost'), register('adp1')]);
+  for (const path of ['/api/admin/overview', '/api/admin/games', '/api/admin/users', '/api/admin/audit', '/api/admin/system',
+    '/api/admin/ratelimits', '/api/admin/quizzes', '/api/admin/announcement', '/api/admin/leaderboard']) {
+    assert.equal((await api(path, { token: p1.token })).status, 403, path);
+    assert.equal((await api(path)).status, 401, path);
+  }
+
+  const tz = 330;
+  const ov = await api(`/api/admin/overview?days=7&tz=${tz}`, { token });
+  assert.equal(ov.status, 200, JSON.stringify(ov.body));
+  assert.equal(ov.body.days, 7);
+  assert.equal(ov.body.series.length, 7);
+  const today = new Date(Date.now() + tz * 60_000).toISOString().slice(0, 10);
+  assert.equal(ov.body.series.at(-1).day, today, 'the last day is today in the viewer’s time zone');
+  assert.ok(ov.body.series.at(-1).signups >= 2, 'today’s sign-ups are counted');
+  assert.ok(ov.body.totals.users >= ov.body.totals.newUsers);
+  assert.ok(Array.isArray(ov.body.byCategory) && Array.isArray(ov.body.byType) && Array.isArray(ov.body.recentUsers));
+  assert.equal((await api('/api/admin/overview?days=5', { token })).body.days, 30, 'an unknown range falls back to 30 days');
+
+  // A lobby with one player, as the monitor sees it.
+  const h = await connect(t, hostUser);
+  await h.hello();
+  const { code } = await createGame(h, { count: 1 });
+  const c1 = await connect(t, p1);
+  await c1.hello();
+  await joinOk(c1, code);
+  const row = (await api('/api/admin/games', { token })).body.games.find((g) => g.code === code);
+  assert.ok(row, 'the new game is listed');
+  assert.equal(row.state, 'lobby');
+  assert.equal(row.live, true);
+  assert.equal(row.hostId, hostUser.id);
+  const detail = await api(`/api/admin/games/${code.toLowerCase()}`, { token });
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.game.code, code);
+  assert.deepEqual(detail.body.players.map((p) => p.username), [p1.username], 'a presenter host is not a player');
+  assert.equal(detail.body.players[0].online, true);
+  assert.equal(detail.body.questions.length, 1);
+  assert.equal(typeof detail.body.questions[0].answer, 'string', 'admins see the answers');
+  assert.equal(detail.body.questions[0].asked, false);
+  assert.equal((await api('/api/admin/games/ZZZZ99', { token })).status, 404);
+  assert.equal((await api('/api/admin/games/bad', { token })).status, 400);
+  const inGame = (await api(`/api/admin/users/${p1.id}`, { token })).body;
+  assert.equal(inGame.currentGame?.code, code);
+  assert.equal(inGame.user.online, true);
+  assert.ok(inGame.sessions.length >= 1);
+
+  // Ending it reaches every player, with the reason; a second end is a no-op.
+  const end = await api(`/api/admin/games/${code}/end`, { method: 'POST', token, body: { reason: 'Closing time' } });
+  assert.equal(end.status, 200);
+  assert.equal(end.body.ended, true);
+  const ev = await c1.next('game:cancelled', (e) => e.code === code, 10_000);
+  assert.equal(ev.reason, 'Closing time');
+  assert.equal((await api(`/api/admin/games/${code}/end`, { method: 'POST', token, body: {} })).body.ended, false);
+  assert.equal((await api(`/api/admin/games/${code}`, { token })).body.game.state, 'cancelled');
+  assert.equal((await c1.hello()).inGame, false);
+});
+
+test('admin console: rename, ban with a reason, kick, sign out everywhere, reset password, delete; all audited', { timeout: 90_000 }, async (t) => {
+  const token = await adminToken();
+  await loadReady();
+  const me = (await api('/api/auth/me', { token })).body.user;
+  const [hostUser, p1, p2] = await Promise.all([register('achost'), register('acp1'), register('acp2')]);
+  const users = (await api(`/api/admin/users?q=${encodeURIComponent(p1.username)}`, { token })).body.users;
+  assert.deepEqual(users.map((u) => u.id), [p1.id]);
+  assert.equal(typeof users[0].lastLoginAt, 'string', 'sign-up counts as the first login');
+
+  // Rename: a taken name is refused, a free one sticks.
+  assert.equal((await api(`/api/admin/users/${p1.id}`, { method: 'PATCH', token, body: { username: p2.username } })).status, 409);
+  assert.equal((await api(`/api/admin/users/${p1.id}`, { method: 'PATCH', token, body: { username: 'no spaces' } })).status, 400);
+  const newName = `ren_${tag(4)}`;
+  const renamed = await api(`/api/admin/users/${p1.id}`, { method: 'PATCH', token, body: { username: newName } });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.body));
+  assert.equal(renamed.body.user.username, newName);
+  assert.equal((await api('/api/auth/me', { token: p1.token })).body.user.username, newName);
+  const reuse = await api('/api/auth/register', { method: 'POST', body: { email: `${tag(5)}@e2e.test`, username: p1.username, password: PASSWORD } });
+  assert.equal(reuse.status, 201, 'the old name is free again');
+
+  // Ban with a reason, then unban.
+  const ban = await api(`/api/admin/users/${p1.id}`, { method: 'PATCH', token, body: { banned: true, banReason: 'spam' } });
+  assert.equal(ban.status, 200);
+  const banned = (await api(`/api/admin/users/${p1.id}`, { token })).body.user;
+  assert.equal(banned.banned, true);
+  assert.equal(banned.banReason, 'spam');
+  assert.equal(banned.bannedBy?.id, me.id);
+  assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: p1.email, password: PASSWORD } })).status, 403);
+  assert.equal((await api(`/api/admin/users/${p1.id}`, { method: 'PATCH', token, body: { banned: false } })).status, 200);
+  assert.equal((await api(`/api/admin/users/${p1.id}`, { token })).body.user.banReason, null);
+  assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: p1.email, password: PASSWORD } })).status, 200);
+
+  // Kick: out of the lobby (seat given back), not banned.
+  const h = await connect(t, hostUser);
+  await h.hello();
+  const { code } = await createGame(h, { count: 1 });
+  const c2 = await connect(t, p2);
+  await c2.hello();
+  await joinOk(c2, code);
+  await h.next('room:state', (s) => s.playerCount === 1, 10_000);
+  h.flush('room:state');
+  const kick = await api(`/api/admin/users/${p2.id}/kick`, { method: 'POST', token });
+  assert.equal(kick.status, 200);
+  assert.equal(kick.body.game, code);
+  await h.next('room:state', (s) => s.playerCount === 0, 10_000);
+  assert.equal((await api('/api/auth/me', { token: p2.token })).status, 200, 'a kick is not a ban');
+  assert.equal((await h.send('game:cancel', {})).ok, true);
+
+  // Sign out everywhere: the old token and its sockets die, a fresh login works.
+  assert.equal((await api(`/api/admin/users/${p2.id}/signout`, { method: 'POST', token })).status, 200);
+  assert.equal((await api('/api/auth/me', { token: p2.token })).status, 401);
+  await assert.rejects(Client.connect(p2, 'revoked'), /socket rejected: HTTP 4\d\d/);
+  const again = await api('/api/auth/login', { method: 'POST', body: { email: p2.email, password: PASSWORD } });
+  assert.equal(again.status, 200);
+  assert.equal((await api('/api/auth/me', { token: again.body.token })).status, 200);
+
+  // Reset password: a one-time temporary password; the old one stops working.
+  const reset = await api(`/api/admin/users/${p2.id}/reset-password`, { method: 'POST', token });
+  assert.equal(reset.status, 200);
+  assert.match(reset.body.password, /^[A-Za-z0-9_-]{12}$/);
+  assert.equal((await api('/api/auth/me', { token: again.body.token })).status, 401);
+  assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: p2.email, password: PASSWORD } })).status, 401);
+  assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: p2.email, password: reset.body.password } })).status, 200);
+
+  // An admin can't lock themself out.
+  assert.equal((await api(`/api/admin/users/${me.id}`, { method: 'PATCH', token, body: { role: 'player' } })).status, 400);
+  assert.equal((await api(`/api/admin/users/${me.id}`, { method: 'PATCH', token, body: { banned: true } })).status, 400);
+  for (const action of ['signout', 'reset-password', 'kick']) {
+    assert.equal((await api(`/api/admin/users/${me.id}/${action}`, { method: 'POST', token })).status, 400, action);
+  }
+  assert.equal((await api(`/api/admin/users/${me.id}`, { method: 'DELETE', token })).status, 400);
+
+  // Delete: the account, its quiz and its results go; the email and name can be used again.
+  await api('/api/quizzes', { method: 'POST', token: (await api('/api/auth/login', { method: 'POST', body: { email: p2.email, password: reset.body.password } })).body.token, body: QUIZ });
+  const del = await api(`/api/admin/users/${p2.id}`, { method: 'DELETE', token });
+  assert.equal(del.status, 200, JSON.stringify(del.body));
+  assert.equal(del.body.quizzes, 1);
+  assert.equal((await api(`/api/admin/users/${p2.id}`, { token })).status, 404);
+  assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: p2.email, password: reset.body.password } })).status, 401);
+  assert.equal((await api('/api/auth/register', { method: 'POST', body: { email: p2.email, username: p2.username, password: PASSWORD } })).status, 201);
+  assert.equal((await api(`/api/admin/users/${p2.id}`, { method: 'DELETE', token })).status, 404);
+
+  // The audit log has all of it, newest first, and pages.
+  const { entries } = (await api('/api/admin/audit?limit=100', { token })).body;
+  for (const action of ['user.rename', 'user.ban', 'user.unban', 'user.kick', 'user.signout', 'user.resetPassword', 'user.delete']) {
+    assert.ok(entries.some((e) => e.action === action && e.admin.id === me.id), `audited: ${action}`);
+  }
+  assert.equal(entries.find((e) => e.action === 'user.ban' && e.target.id === p1.id)?.details.reason, 'spam');
+  assert.ok(entries.every((e, i) => i === 0 || entries[i - 1].at >= e.at), 'newest first');
+  const page1 = (await api('/api/admin/audit?limit=2', { token })).body;
+  assert.equal(page1.entries.length, 2);
+  const page2 = (await api(`/api/admin/audit?limit=2&before=${encodeURIComponent(page1.next)}`, { token })).body;
+  assert.ok(page2.entries.length >= 1);
+  assert.ok(page2.entries[0].id < page1.entries[1].id, 'the next page starts after the last entry');
+});
+
+test('admin console: question import / rename / bulk delete, quiz moderation, announcement, rate limits, system', { timeout: 60_000 }, async () => {
+  const token = await adminToken();
+  const cat = `E2E imp ${tag(3)}`;
+  const qs = [1, 2, 3].map((i) => ({ type: 'truefalse', text: `Import test ${cat} ${i}?`, correctIndex: 0, category: cat }));
+  const bad = await api('/api/admin/questions/import', { method: 'POST', token, body: { questions: [qs[0], { text: 'x' }] } });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body.error, /^Question 2: /);
+  const imp = await api('/api/admin/questions/import', { method: 'POST', token, body: { questions: qs } });
+  assert.deepEqual([imp.status, imp.body.imported, imp.body.skipped], [200, 3, 0]);
+  assert.equal((await api('/api/admin/questions/import', { method: 'POST', token, body: { questions: qs } })).body.skipped, 3, 'imports skip known texts');
+  const moved = await api('/api/admin/categories/rename', { method: 'POST', token, body: { from: cat, to: `${cat} B` } });
+  assert.deepEqual([moved.status, moved.body.moved], [200, 3]);
+  assert.equal((await api('/api/admin/categories/rename', { method: 'POST', token, body: { from: cat, to: 'Elsewhere' } })).status, 404);
+  const listed = (await api(`/api/admin/questions?category=${encodeURIComponent(`${cat} B`)}&type=truefalse`, { token })).body.questions;
+  assert.equal(listed.length, 3);
+  const bulk = await api('/api/admin/questions/bulk-delete', { method: 'POST', token, body: { ids: [...listed.map((q) => q.id), 'no-such-id'] } });
+  assert.deepEqual([bulk.status, bulk.body.deleted], [200, 3]);
+  assert.equal((await api(`/api/admin/questions?category=${encodeURIComponent(`${cat} B`)}`, { token })).body.questions.length, 0);
+
+  // Quiz moderation: list (no answers), read in full, unshare, delete.
+  const [owner, other] = await Promise.all([register('amowner'), register('amother')]);
+  const { quiz } = (await api('/api/quizzes', { method: 'POST', token: owner.token, body: { ...QUIZ, shared: true } })).body;
+  const all = (await api('/api/admin/quizzes', { token })).body.quizzes;
+  const mine = all.find((q) => q.id === quiz.id);
+  assert.equal(mine?.ownerId, owner.id);
+  assert.equal(mine.questions, undefined, 'the list carries no questions');
+  assert.equal((await api(`/api/admin/quizzes/${quiz.id}`, { token })).body.quiz.questions.length, QUIZ.questions.length);
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { token: other.token })).status, 200);
+  assert.equal((await api(`/api/admin/quizzes/${quiz.id}`, { method: 'PATCH', token, body: { shared: false } })).status, 200);
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { token: other.token })).status, 404, 'unshared: gone for others');
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { token: owner.token })).status, 200, 'the owner keeps it');
+  assert.equal((await api(`/api/admin/quizzes/${quiz.id}`, { method: 'DELETE', token })).status, 200);
+  assert.equal((await api(`/api/quizzes/${quiz.id}`, { token: owner.token })).status, 404);
+  assert.equal((await api(`/api/admin/quizzes/${quiz.id}`, { method: 'DELETE', token })).status, 404);
+
+  // Announcement: validated, public, removable.
+  assert.equal((await api('/api/admin/announcement', { method: 'PUT', token, body: { text: 'x' } })).status, 400);
+  const text = `E2E announcement ${tag(3)}`;
+  const put = await api('/api/admin/announcement', { method: 'PUT', token, body: { text, tone: 'warn' } });
+  assert.equal(put.status, 200);
+  assert.equal(put.body.announcement.tone, 'warn');
+  const shown = await eventually(async () => {
+    const r = await api('/api/announcement');
+    return r.body?.announcement?.text === text ? r.body.announcement : null;
+  });
+  assert.ok(shown, 'the announcement is public');
+  assert.equal((await api('/api/admin/announcement', { method: 'DELETE', token })).status, 200);
+  assert.ok(await eventually(async () => (await api('/api/announcement')).body?.announcement === null), 'and gone after removal');
+
+  // Rate limits: a failed login shows up against the account; resetting it clears it.
+  const victim = await register('amrl');
+  assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: victim.email, password: 'wrong-password' } })).status, 401);
+  const limits = (await api('/api/admin/ratelimits', { token })).body;
+  const counter = limits.counters.find((c) => c.kind === 'login-account' && c.user?.id === victim.id);
+  assert.ok(counter, 'the failed login is counted against the account');
+  assert.equal(counter.hits, 1);
+  assert.equal(counter.subject, victim.email);
+  assert.equal((await api(`/api/admin/ratelimits/${encodeURIComponent(counter.key)}`, { method: 'DELETE', token })).status, 200);
+  assert.ok(!(await api('/api/admin/ratelimits', { token })).body.counters.some((c) => c.key === counter.key));
+  assert.equal((await api('/api/admin/ratelimits/not-a-counter', { method: 'DELETE', token })).status, 400);
+
+  // System and leaderboards.
+  const sys = await api('/api/admin/system', { token });
+  assert.equal(sys.status, 200);
+  assert.equal(sys.body.health.database, 'ok');
+  assert.ok(sys.body.tables.some((tb) => tb.label === 'Admin' && tb.status === 'ACTIVE'));
+  assert.ok(Number.isInteger(sys.body.config.maxPlayers));
+  assert.equal((await api('/api/admin/leaderboard/refresh', { method: 'POST', token })).status, 200);
+  assert.equal((await api('/api/admin/leaderboard?period=week', { token })).body.period, 'week');
+});
+
 test("the local server's handlers never crashed during these tests", async (t) => {
   if (!statsAtStart) return t.skip('no /__local/stats (not the local dev server)');
   const now = await localStats();

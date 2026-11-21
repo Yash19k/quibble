@@ -6,15 +6,17 @@
   <!-- The login token lives in localStorage: only this site's own scripts may run here. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta name="robots" content="noindex">
   <title>Quibble Admin</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <script src="/js/theme.js"></script>
   <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/admin.css">
 </head>
-<body>
+<body class="admin">
   <header class="top">
-    <a class="brand" href="/index.html">Quib<span>ble</span> <small class="muted">admin</small></a>
-    <nav><a class="btn ghost small" href="/play.html">Back to game</a></nav>
+    <a class="brand" href="#/overview">Quib<span>ble</span> <small class="muted">admin</small></a>
+    <nav id="nav"></nav>
   </header>
   <div id="netbar" class="netbar" role="status" aria-live="polite" hidden></div>
   <main id="app"><p class="muted">Loading…</p></main>

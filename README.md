@@ -21,7 +21,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 - **Big-screen mode (optional):** the host's screen becomes a projector view (huge question, timer, animated leaderboard) and phones become answer pads
 - **My quizzes:** anyone can build their own quiz with any question type, host it, or share a link so others can host it (they never see the answers)
 - **Leaderboards** (all-time and this week) and a personal match history
-- **Admin panel:** question editor, one-click trivia import from Open Trivia DB, promote or ban users (a ban kicks them out of live games instantly), usage stats
+- **Admin console** (`admin.html`, admins only): a live dashboard, a live-games monitor that can end any game, full game history, player accounts (rename, ban with a reason, kick, sign out everywhere, reset password, delete), the question bank (bulk delete, JSON import/export, category rename, Open Trivia DB import), player-quiz moderation, leaderboards, a site-wide announcement banner, rate-limit counters, system health and an audit log of every admin action. See [Admin console](#admin-console)
 - **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP sign-up and failed-login limits (sized for a whole classroom on one Wi-Fi), API Gateway throttling, least-privilege IAM roles
 - **Observability:** structured logs, custom game metrics, alarms and a CloudWatch dashboard, all created by the template
 
@@ -37,7 +37,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
                                  $default    ──► Lambda: ws-message  ──────►  Users · Questions
                                  $disconnect ──► Lambda: ws-disconnect        Games · GamePlay · Quizzes
                                                     │  ▲                      Connections · Results
-                     async invoke at deadline ──────┘  │ PostToConnection     RateLimits
+                     async invoke at deadline ──────┘  │ PostToConnection     RateLimits · Admin
                                  Lambda: game-timer ───┘ (pushes events to every player)
 
  Amazon CloudWatch  log groups (14-day retention) · alarms · custom metrics · dashboard
@@ -49,7 +49,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 | **API Gateway WebSocket API** | Persistent connection for gameplay: `$connect` authenticates, `$default` handles game actions, `$disconnect` marks players offline |
 | **API Gateway HTTP API** | REST endpoints for login, leaderboards, history and the admin panel |
 | **AWS Lambda** | Five Node.js 22 functions on arm64: `api`, `ws-connect`, `ws-message`, `ws-disconnect`, `game-timer` |
-| **Amazon DynamoDB** | Eight on-demand tables (Quizzes holds the quizzes players build). TTL cleans up old games, game-play items, sockets and rate-limit counters |
+| **Amazon DynamoDB** | Nine on-demand tables (Quizzes holds the quizzes players build; Admin holds the audit log and the announcement). TTL cleans up old games, game-play items, sockets, rate-limit counters and year-old audit entries |
 | **Amazon S3** | Hosts the static frontend, served over HTTPS |
 | **Amazon CloudWatch** | Logs, alarms, a dashboard and custom metrics in the `Quibble` namespace |
 | **AWS IAM** | Least-privilege execution role per function |
@@ -192,6 +192,26 @@ Two endpoints show what happened: `GET /__local/stats` (invocations, throttles, 
 - [ ] The CloudWatch dashboard is open: Lambda concurrency and throttles, DynamoDB throttles
 - [ ] No deploys while a game is running (preflight warns about live games)
 
+## Admin console
+
+Open `admin.html` (the **Admin** button in the game header) with an admin account. Every page reads live data from the API; every change is written to the audit log.
+
+| Page | What you can see and do |
+|---|---|
+| **Overview** | Who is online and which games are live right now; sign-ups, games, active players and plays per day over 7, 30 or 90 days (in your time zone) against the previous period; top players, the question bank by category and type, the newest players, recent games and admin activity |
+| **Live games** | Every lobby and running game, refreshed every 5 s. Open one to follow it question by question (who is online, standings, how many got each question right) or **end it** for everyone with a reason |
+| **Game history** | Every stored game (finished games are kept 30 days, cancelled ones a day), searchable and filterable; each has its final standings, awards and per-question results |
+| **Players** | Every account with games, points, join and last-login dates and online status; search, filter (online, admins, banned), sort, CSV export. A player's page has their stats, game history, quizzes and open connections, plus **rename**, **make / remove admin**, **ban with a reason** / unban, **kick from game**, **sign out everywhere**, **reset password** (shows a one-time temporary password) and **delete account** (with its results and quizzes) |
+| **Question bank** | Search and filter by category and type, add / edit / delete, select and delete in bulk, **import a JSON file**, **export** the current filter, **rename or merge a category**, import from Open Trivia DB |
+| **Player quizzes** | Every quiz players built, with owner and sharing; read one with its answers, **stop sharing** it or delete it |
+| **Leaderboards** | The boards players see (all time / this week), with a button to recompute them |
+| **Announcement** | One message (info or warning) shown above the game on every player's page until you take it down |
+| **Activity log** | Who changed what and when, for every admin action (kept a year) |
+| **Security** | The sign-up and failed-login counters of the current windows (account counters are matched back to a username), with a reset to let a blocked network or account in again |
+| **System health** | API and database response times, open sockets, the runtime and game settings in force, and every DynamoDB table's size |
+
+"Sign out everywhere" and "reset password" bump a session version stored on the account and carried in every login token, so exactly the tokens (and sockets) issued before it stop working; an admin can't demote, ban, sign out, reset or delete their own account.
+
 ## Monitoring
 
 - **Dashboard** (the `DashboardUrl` output): games created, started, finished and cancelled, answers, Lambda concurrency and throttles (account-wide and per function), DynamoDB throttles and GamePlay capacity, WebSocket connections, API latency and errors, Lambda errors and duration, and a live table of recent error logs.
@@ -207,7 +227,7 @@ Everything is pay-per-use and nothing runs while idle. Lambda, API Gateway and D
 ```
 public/                     frontend (vanilla JS, no build step), deployed to S3
   index.html                landing page    play.html       game page
-  js/app.js                 player app      js/admin.js     admin panel
+  js/app.js                 player app      js/admin.js     admin console (pages in js/admin/)
   js/realtime.js            WebSocket client with acks, resends + auto-reconnect
   js/net.js                 HTTP client with retries and backoff
 aws/

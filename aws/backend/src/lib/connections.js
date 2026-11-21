@@ -1,5 +1,5 @@
 // Connections table: one item per open WebSocket.
-//   connectionId (PK), userId, gameCode?, seat?, tokenIat, connectedAt, expiresAt (TTL)
+//   connectionId (PK), userId, gameCode?, seat?, tokenIat, tokenSv, connectedAt, expiresAt (TTL)
 // GSI byUser (userId) reaches all of a user's tabs (attaching other tabs to a game, closing a banned user's sockets).
 // Game broadcasts never come from this table: their targets are the `conns` sets on the game's member items
 // (lib/gamedata.js), read with a strongly consistent Query.
@@ -9,10 +9,10 @@ import { env } from './config.js';
 
 const TTL_SECONDS = 3 * 60 * 60; // API Gateway closes sockets after 2 h anyway
 
-export async function saveConnection(connectionId, userId, tokenIat) {
+export async function saveConnection(connectionId, userId, tokenIat, tokenSv = 0) {
   await ddb.send(new PutCommand({
     TableName: env.connectionsTable,
-    Item: { connectionId, userId, tokenIat, connectedAt: nowIso(), expiresAt: Math.floor(Date.now() / 1000) + TTL_SECONDS },
+    Item: { connectionId, userId, tokenIat, tokenSv, connectedAt: nowIso(), expiresAt: Math.floor(Date.now() / 1000) + TTL_SECONDS },
   }));
 }
 

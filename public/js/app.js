@@ -718,13 +718,47 @@ async function resolveQuizLink() {
 }
 
 /** A settings row with an on/off switch: icon, title, one line of help. */
-function settingRow(input, iconName, title, help) {
+function settingRow(input, iconName, title, help, { tip = null } = {}) {
   input.classList.add('switch');
   input.setAttribute('role', 'switch');
-  return el('label', { class: 'setting' },
-    el('span', { class: 'setting-icon' }, icon(iconName)),
-    el('span', { class: 'setting-text' }, el('b', {}, title), help ? el('small', {}, help) : null),
-    input);
+  const helpEl = help ? el('small', {}, help) : null;
+  const row = el('div', { class: 'setting-wrap' },
+    el('label', { class: 'setting' },
+      el('span', { class: 'setting-icon' }, icon(iconName)),
+      el('span', { class: 'setting-text' }, el('span', { class: 'setting-title' }, el('b', {}, title)), helpEl),
+      input));
+  if (tip) row.querySelector('.setting-title').append(tip);
+  row.helpEl = helpEl;
+  return row;
+}
+
+let tipSeq = 0;
+/**
+ * A small (i) button with a themed tooltip: shown on hover and keyboard focus, toggled by a tap (phones have no hover).
+ * Escape or a tap elsewhere closes it.
+ */
+function infoTip(text, label = 'Why?') {
+  const id = `tip${++tipSeq}`;
+  const bubble = el('span', { class: 'tip-bubble', role: 'tooltip', id }, text);
+  const btn = el('button', { type: 'button', class: 'tip-btn', 'aria-label': label, 'aria-describedby': id, 'aria-expanded': 'false' }, icon('info', { size: 16 }));
+  const wrap = el('span', { class: 'tip' }, btn, bubble);
+  const set = (open) => {
+    wrap.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', String(open));
+  };
+  btn.addEventListener('click', (e) => {
+    e.preventDefault(); // inside a <label>: don't flip the switch
+    e.stopPropagation();
+    set(!wrap.classList.contains('open'));
+  });
+  btn.addEventListener('keydown', (e) => { if (e.key === 'Escape') set(false); });
+  btn.addEventListener('blur', () => set(false));
+  const outside = (e) => {
+    if (!wrap.isConnected) return document.removeEventListener('click', outside); // the screen was redrawn
+    if (!wrap.contains(e.target)) set(false);
+  };
+  document.addEventListener('click', outside);
+  return wrap;
 }
 
 function playTab(body) {
@@ -773,12 +807,30 @@ function playTab(body) {
   };
 
   hostPlays.addEventListener('change', () => { hostPrefs.hostPlays = hostPlays.checked; paintSummary(); });
+  // Big-screen mode turns "Play along" off (the host's screen is the projector) and says why.
+  const playTip = infoTip(
+    'In big-screen mode this screen shows the questions to the whole room, so it can’t answer too. Want to play? Join from your phone with the game code.',
+    'Why is Play along off?');
+  const playRow = settingRow(hostPlays, 'user', 'Play along', 'Answer the questions yourself', { tip: playTip });
+  const paintPlayAlong = () => {
+    const big = bigScreen.checked;
+    hostPlays.disabled = big;
+    hostPlays.checked = !big && hostPrefs.hostPlays;
+    playTip.hidden = !big;
+    if (playRow.helpEl) playRow.helpEl.textContent = big ? 'Off in big-screen mode' : 'Answer the questions yourself';
+  };
   bigScreen.addEventListener('change', () => {
     hostPrefs.bigScreen = bigScreen.checked;
-    hostPlays.disabled = bigScreen.checked;
-    hostPlays.checked = !bigScreen.checked && hostPrefs.hostPlays;
+    paintPlayAlong();
     paintSummary();
+    // Point it out once, right when it happens.
+    if (bigScreen.checked && !hostPlays.dataset.tipShown) {
+      hostPlays.dataset.tipShown = '1';
+      playTip.classList.add('open');
+      setTimeout(() => playTip.classList.remove('open'), 4500);
+    }
   });
+  paintPlayAlong();
   doublePts.addEventListener('change', () => { hostPrefs.doublePoints = doublePts.checked; paintSummary(); });
   shuffle.addEventListener('change', () => { hostPrefs.shuffle = shuffle.checked; });
   quizSelect.addEventListener('change', () => { hostPrefs.quizId = quizSelect.value || null; paintSummary(); });
@@ -922,7 +974,7 @@ function playTab(body) {
           el('h4', { class: 'section-title' }, 'Game settings'),
           settingRow(doublePts, 'zap', 'Double-points rounds', 'The final question and a few others score 2×'),
           settingRow(bigScreen, 'monitor', 'Big-screen mode', 'Put the game on a projector or TV for the room'),
-          settingRow(hostPlays, 'user', 'Play along', 'Answer the questions yourself'),
+          playRow,
           summary,
           createErr,
           createBtn))));

@@ -454,7 +454,30 @@ dialog.modal p { margin: 0 0 4px; }
 .setting-text b { font-weight: 700; }
 .setting-text small { font: 500 .74rem var(--mono); color: var(--muted); }
 .setting:has(input:disabled) { cursor: not-allowed; }
-.setting:has(input:disabled) .setting-text, .setting:has(input:disabled) .setting-icon { opacity: .45; }
+.setting:has(input:disabled) .setting-title b, .setting:has(input:disabled) .setting-icon, .setting:has(input:disabled) input.switch { opacity: .45; }
+.setting:has(input:disabled) .setting-text small { color: var(--ink-2); }
+.setting-title { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---------- tooltip: (i) button + bubble (hover, keyboard focus or tap) ---------- */
+.tip { position: relative; display: inline-flex; }
+button.tip-btn {
+  display: grid; place-items: center; width: 22px; height: 22px; padding: 0;
+  background: none; color: var(--accent); border: 0; border-radius: 50%; box-shadow: none; cursor: help;
+}
+button.tip-btn:hover:not(:disabled), button.tip-btn:active:not(:disabled) { transform: none; box-shadow: none; background: var(--sunk); }
+.tip-bubble {
+  position: absolute; z-index: 30; bottom: calc(100% + 10px); left: -96px; width: min(260px, 72vw);
+  padding: 10px 12px; background: var(--ink); color: var(--paper);
+  font: 500 .82rem/1.45 var(--display); text-transform: none; letter-spacing: 0; white-space: normal;
+  border-radius: var(--r); box-shadow: 3px 3px 0 var(--accent);
+  opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .15s, transform .15s, visibility .15s;
+  pointer-events: none;
+}
+.tip-bubble::after {
+  content: ''; position: absolute; top: 100%; left: 101px;
+  border: 6px solid transparent; border-top-color: var(--ink);
+}
+.tip:hover .tip-bubble, .tip-btn:focus-visible + .tip-bubble, .tip.open .tip-bubble { opacity: 1; visibility: visible; transform: none; }
 .host-fields .setting { border-bottom: 0; padding: 0; }
 
 input.switch {

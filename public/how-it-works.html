@@ -22,6 +22,7 @@
   <a class="brand" href="/index.html">Quib<span>ble</span><small>How it works</small></a>
   <nav>
     <a class="nav-link wide-only" href="#run">Run it yourself</a>
+    <a class="nav-link wide-only" href="/deploy.html">Deploy guide</a>
     <a class="nav-link" href="https://github.com/Yash19k/quibble" rel="noopener">GitHub</a>
     <a class="btn primary small" href="/play.html">Play now</a>
   </nav>
@@ -318,7 +319,7 @@
     <div class="st-head">
       <p class="eyebrow">Your turn</p>
       <h2>Run it yourself</h2>
-      <p>Start on your laptop: the local dev server runs the real Lambda code against DynamoDB Local, so you need no AWS account. When you're ready, the same repo deploys to your own account with three commands.</p>
+      <p>Start on your laptop: the local dev server runs the real Lambda code against DynamoDB Local, so you need no AWS account. When you're ready, the same repo deploys to your own account with three commands, and the <a href="/deploy.html">step-by-step deploy guide</a> explains each one, from account safety to teardown.</p>
     </div>
     <div class="run-grid">
       <div class="card pad run-card">
@@ -332,7 +333,7 @@ npm run dev</code></pre><button class="btn" type="button" data-copy="cmd-local">
       </div>
       <div class="card pad run-card">
         <h3>2. Deploy to AWS</h3>
-        <p>Needs the AWS CLI logged in and the SAM CLI. Prints your HTTPS link at the end.</p>
+        <p>Needs the AWS CLI logged in and the SAM CLI. Prints your HTTPS link at the end. First time on AWS? The <a href="/deploy.html">deploy guide</a> walks through every step.</p>
         <div class="cmd"><pre class="code"><code id="cmd-deploy">npm run preflight
 npm run deploy
 npm run seed</code></pre><button class="btn" type="button" data-copy="cmd-deploy">Copy</button></div>
@@ -348,7 +349,7 @@ sam delete --stack-name quibble</code></pre><button class="btn" type="button" da
 
   <footer class="foot">
     <span>Quibble is open source: <a href="https://github.com/Yash19k/quibble" target="_blank" rel="noopener">github.com/Yash19k/quibble</a></span>
-    <span>Seen enough? <a href="/play.html">Play a real game</a></span>
+    <span>Seen enough? <a href="/play.html">Play a real game</a> or <a href="/deploy.html">deploy your own</a></span>
   </footer>
 </main>
 

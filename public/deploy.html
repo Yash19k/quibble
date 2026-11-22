@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Same origin as the game, whose login token lives in localStorage: only this site's own scripts may run here. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Quibble · Deploy guide</title>
+  <meta name="description" content="Deploy your own copy of Quibble to AWS, step by step: what each AWS service does, how the deploy scripts work, what it costs and how to tear it all down.">
+  <meta name="theme-color" content="#ff5420">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <script src="/js/theme.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@500;700&display=swap">
+  <link rel="stylesheet" href="/css/how.css">
+  <link rel="stylesheet" href="/css/deploy.css">
+</head>
+<!-- data-page="how": the analytics heartbeat only knows the existing page names; this guide counts with the tour. -->
+<body data-page="how" class="deploy">
+<header class="top">
+  <a class="brand" href="/index.html">Quib<span>ble</span><small>Deploy guide</small></a>
+  <nav>
+    <a class="nav-link wide-only" href="/how-it-works.html">How it works</a>
+    <a class="nav-link" href="https://github.com/Yash19k/quibble" rel="noopener">GitHub</a>
+    <a class="btn primary small" href="/play.html">Play now</a>
+  </nav>
+</header>
+
+<main class="wrap">
+  <section class="hero dp-hero">
+    <p class="eyebrow">Deploy guide · your own copy, your own AWS account</p>
+    <h1>Put your own Quibble on AWS</h1>
+    <p class="lead">Quibble is open source, and the same repository that runs this site deploys a complete copy to any AWS account with a handful of commands. This guide walks through them one at a time and explains what each one does, so by the end you know what CloudFormation, Lambda, API Gateway, DynamoDB and S3 are actually doing for you.</p>
+    <p class="dp-meta">Plan on roughly an hour the first time, plus up to a day of waiting if you ask AWS to raise your Lambda quota (step 6). You need a computer running Windows, macOS or Linux, an AWS account and an email address. New to how Quibble is built? <a href="/how-it-works.html">Take the interactive tour</a> first.</p>
+    <div class="dp-cta">
+      <a class="btn primary" href="#picture">Start with the big picture</a>
+      <a class="btn" href="#step-account">Skip to the steps</a>
+    </div>
+  </section>
+
+  <div class="guide">
+    <!-- ================= contents + progress ================= -->
+    <aside class="toc" id="toc" aria-label="Guide contents">
+      <button class="toc-toggle" id="toc-toggle" type="button" aria-expanded="false" aria-controls="toc-panel">
+        <span class="toc-toggle-t"><b>Contents</b><span class="toc-count" data-prog-short>0 of 11 steps done</span></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="toc-panel" id="toc-panel">
+        <div class="prog">
+          <p class="kicker">Your progress</p>
+          <p class="prog-text" data-prog-long>0 of 11 steps done</p>
+          <div class="prog-bar" id="prog-bar" role="progressbar" aria-label="Steps done" aria-valuemin="0" aria-valuemax="11" aria-valuenow="0"><i></i></div>
+          <div class="prog-foot">
+            <span class="note">Saved in this browser only.</span>
+            <button class="link-btn" id="prog-reset" type="button" disabled>Reset</button>
+          </div>
+        </div>
+
+        <p class="toc-h">Understand</p>
+        <ol class="toc-list">
+          <li><a href="#picture"><span class="n">A</span><span class="t">The big picture</span></a></li>
+          <li><a href="#concepts"><span class="n">B</span><span class="t">The AWS pieces</span></a></li>
+          <li><a href="#costs"><span class="n">C</span><span class="t">What it costs</span></a></li>
+        </ol>
+
+        <p class="toc-h">Deploy</p>
+        <ol class="toc-list steps">
+          <li data-step="account"><a href="#step-account"><span class="n"><b>1</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Protect your account</span></a></li>
+          <li data-step="region"><a href="#step-region"><span class="n"><b>2</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Pick a region</span></a></li>
+          <li data-step="tools"><a href="#step-tools"><span class="n"><b>3</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Install the tools</span></a></li>
+          <li data-step="configure"><a href="#step-configure"><span class="n"><b>4</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Connect the CLI</span></a></li>
+          <li data-step="code"><a href="#step-code"><span class="n"><b>5</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Get the code</span></a></li>
+          <li data-step="quota"><a href="#step-quota"><span class="n"><b>6</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Raise the Lambda quota</span></a></li>
+          <li data-step="preflight"><a href="#step-preflight"><span class="n"><b>7</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Run the preflight</span></a></li>
+          <li data-step="deploy"><a href="#step-deploy"><span class="n"><b>8</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Deploy</span></a></li>
+          <li data-step="seed"><a href="#step-seed"><span class="n"><b>9</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Admin and questions</span></a></li>
+          <li data-step="alerts"><a href="#step-alerts"><span class="n"><b>10</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Email alerts</span></a></li>
+          <li data-step="verify"><a href="#step-verify"><span class="n"><b>11</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t">Check it works</span></a></li>
+        </ol>
+
+        <p class="toc-h">Afterwards</p>
+        <ol class="toc-list">
+          <li><a href="#trouble"><span class="n">D</span><span class="t">Troubleshooting</span></a></li>
+          <li><a href="#update"><span class="n">E</span><span class="t">Ship updates</span></a></li>
+          <li><a href="#teardown"><span class="n">F</span><span class="t">Tear it all down</span></a></li>
+        </ol>
+      </div>
+    </aside>
+
+    <div class="content">
+      <!-- ================= A. BIG PICTURE ================= -->
+      <section class="part" id="picture">
+        <div class="st-head">
+          <p class="eyebrow">Part A</p>
+          <h2>The big picture</h2>
+          <p>Everything Quibble needs is described in one file, <code>aws/template.yaml</code>. When you deploy, AWS CloudFormation reads that file and creates every piece as a single unit called a <b>stack</b> (named <code>quibble</code> unless you choose otherwise). One command creates it, later deploys update it, and one command deletes all of it.</p>
+        </div>
+        <figure class="card arch-card">
+          <div class="arch-scroll">
+            <svg class="arch" viewBox="0 0 1000 620" role="img" aria-labelledby="arch-title arch-desc">
+              <title id="arch-title">What a Quibble deploy creates</title>
+              <desc id="arch-desc">Your computer builds the code and uploads it to a SAM artifact bucket, and uploads the website to S3. CloudFormation creates one stack containing an S3 website bucket, an HTTP API and a WebSocket API in API Gateway, five game Lambda functions, nine DynamoDB tables and one IAM role per function. A monitor Lambda, run every minute by EventBridge and by CloudWatch alarms, emails you through Amazon SNS.</desc>
+              <defs>
+                <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0 10 5 0 10z"/></marker>
+                <marker id="ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahd" d="M0 0 10 5 0 10z"/></marker>
+              </defs>
+
+              <rect class="stack" x="260" y="10" width="725" height="600" rx="10"/>
+              <text class="g-label" x="278" y="32">CLOUDFORMATION STACK · quibble</text>
+              <rect class="group" x="500" y="138" width="190" height="345" rx="8"/>
+              <text class="g-label" x="514" y="160">AWS LAMBDA</text>
+
+              <!-- run-time requests -->
+              <g class="edges">
+                <path d="M200 320 C 270 320, 262 96, 286 96"/>
+                <path d="M200 345 C 245 345, 245 195, 286 195"/>
+                <path d="M200 370 C 245 370, 245 330, 286 330"/>
+                <path d="M470 195 C 492 195, 492 192, 511 192"/>
+                <path d="M470 316 C 492 316, 492 252, 511 252"/>
+                <path d="M470 340 C 492 340, 492 302, 511 302"/>
+                <path d="M470 364 C 492 364, 492 352, 511 352"/>
+                <path d="M515 436 C 420 436, 380 436, 380 394"/>
+                <path d="M675 192 H716"/><path d="M675 252 H716"/><path d="M675 302 H716"/><path d="M675 352 H716"/><path d="M675 436 H716"/>
+                <path d="M720 553 H679"/>
+                <path d="M907 586 V600 H595 V590"/>
+                <path d="M515 553 H474"/>
+                <path d="M290 553 H204"/>
+              </g>
+              <text class="e-label" x="430" y="428">push</text>
+
+              <!-- deploy-time uploads -->
+              <g class="edges deploy">
+                <path d="M200 62 H286"/>
+                <path d="M110 110 V166"/>
+                <path d="M200 208 H256"/>
+              </g>
+              <text class="e-label d" x="230" y="54" text-anchor="middle">publish</text>
+              <text class="e-label d" x="118" y="143">sam build</text>
+              <text class="e-label d" x="229" y="200" text-anchor="middle">deploy</text>
+
+              <!-- outside AWS -->
+              <g class="nd"><rect class="sh" x="24" y="34" width="180" height="80" rx="6"/><rect class="box" x="20" y="30" width="180" height="80" rx="6"/>
+                <text class="t" x="110" y="63" text-anchor="middle">Your computer</text><text class="s" x="110" y="85" text-anchor="middle">npm run deploy</text></g>
+              <g class="nd"><rect class="sh" x="24" y="174" width="180" height="76" rx="6"/><rect class="box" x="20" y="170" width="180" height="76" rx="6"/>
+                <text class="t" x="110" y="202" text-anchor="middle">SAM artifacts</text><text class="s" x="110" y="223" text-anchor="middle">zipped code in S3</text></g>
+              <g class="nd"><rect class="sh" x="24" y="304" width="180" height="100" rx="6"/><rect class="box" x="20" y="300" width="180" height="100" rx="6"/>
+                <text class="t" x="110" y="344" text-anchor="middle">Player's browser</text><text class="s" x="110" y="366" text-anchor="middle">phone or laptop</text></g>
+              <g class="nd"><rect class="sh" x="24" y="524" width="180" height="66" rx="6"/><rect class="box" x="20" y="520" width="180" height="66" rx="6"/>
+                <text class="t" x="110" y="548" text-anchor="middle">Your inbox</text><text class="s" x="110" y="569" text-anchor="middle">AlertEmail</text></g>
+
+              <!-- inside the stack -->
+              <g class="nd"><rect class="sh" x="294" y="49" width="180" height="66" rx="6"/><rect class="box" x="290" y="45" width="180" height="66" rx="6"/>
+                <text class="t" x="380" y="73" text-anchor="middle">Amazon S3</text><text class="s" x="380" y="94" text-anchor="middle">website + config.js</text></g>
+              <g class="nd"><rect class="sh" x="504" y="49" width="465" height="66" rx="6"/><rect class="box" x="500" y="45" width="465" height="66" rx="6"/>
+                <text class="t" x="732" y="73" text-anchor="middle">AWS IAM</text><text class="s" x="732" y="94" text-anchor="middle">one role per function, scoped to its tables and APIs</text></g>
+              <g class="nd"><rect class="sh" x="294" y="164" width="180" height="70" rx="6"/><rect class="box" x="290" y="160" width="180" height="70" rx="6"/>
+                <text class="t" x="380" y="190" text-anchor="middle">HTTP API</text><text class="s" x="380" y="211" text-anchor="middle">/api/* requests</text></g>
+              <g class="nd"><rect class="sh" x="294" y="266" width="180" height="128" rx="6"/><rect class="box" x="290" y="262" width="180" height="128" rx="6"/>
+                <text class="t" x="380" y="290" text-anchor="middle">WebSocket API</text>
+                <text class="r" x="306" y="320">$connect</text><text class="r" x="306" y="344">$default</text><text class="r" x="306" y="368">$disconnect</text></g>
+
+              <g class="nd"><rect class="sh" x="519" y="176" width="160" height="40" rx="6"/><rect class="box" x="515" y="172" width="160" height="40" rx="6"/><text class="t sm" x="595" y="197" text-anchor="middle">λ api</text></g>
+              <g class="nd"><rect class="sh" x="519" y="236" width="160" height="40" rx="6"/><rect class="box" x="515" y="232" width="160" height="40" rx="6"/><text class="t sm" x="595" y="257" text-anchor="middle">λ ws-connect</text></g>
+              <g class="nd"><rect class="sh" x="519" y="286" width="160" height="40" rx="6"/><rect class="box" x="515" y="282" width="160" height="40" rx="6"/><text class="t sm" x="595" y="307" text-anchor="middle">λ ws-message</text></g>
+              <g class="nd"><rect class="sh" x="519" y="336" width="160" height="40" rx="6"/><rect class="box" x="515" y="332" width="160" height="40" rx="6"/><text class="t sm" x="595" y="357" text-anchor="middle">λ ws-disconnect</text></g>
+              <g class="nd"><rect class="sh" x="519" y="414" width="160" height="52" rx="6"/><rect class="box" x="515" y="410" width="160" height="52" rx="6"/>
+                <text class="t sm" x="595" y="432" text-anchor="middle">λ game-timer</text><text class="s" x="595" y="451" text-anchor="middle">runs the clock</text></g>
+
+              <g class="nd"><rect class="sh" x="724" y="142" width="245" height="345" rx="6"/><rect class="box" x="720" y="138" width="245" height="345" rx="6"/>
+                <text class="t" x="736" y="165">Amazon DynamoDB</text><text class="s" x="736" y="185">9 tables · on-demand</text>
+                <g class="tbl"><rect x="732" y="198" width="221" height="24" rx="4"/><text x="744" y="215">Users</text></g>
+                <g class="tbl"><rect x="732" y="228" width="221" height="24" rx="4"/><text x="744" y="245">Questions</text></g>
+                <g class="tbl"><rect x="732" y="258" width="221" height="24" rx="4"/><text x="744" y="275">Games</text></g>
+                <g class="tbl"><rect x="732" y="288" width="221" height="24" rx="4"/><text x="744" y="305">GamePlay</text></g>
+                <g class="tbl"><rect x="732" y="318" width="221" height="24" rx="4"/><text x="744" y="335">Connections</text></g>
+                <g class="tbl"><rect x="732" y="348" width="221" height="24" rx="4"/><text x="744" y="365">Results</text></g>
+                <g class="tbl"><rect x="732" y="378" width="221" height="24" rx="4"/><text x="744" y="395">Quizzes</text></g>
+                <g class="tbl"><rect x="732" y="408" width="221" height="24" rx="4"/><text x="744" y="425">RateLimits</text></g>
+                <g class="tbl"><rect x="732" y="438" width="221" height="24" rx="4"/><text x="744" y="455">Admin</text></g></g>
+
+              <g class="nd"><rect class="sh" x="294" y="524" width="180" height="66" rx="6"/><rect class="box" x="290" y="520" width="180" height="66" rx="6"/>
+                <text class="t" x="380" y="548" text-anchor="middle">Amazon SNS</text><text class="s" x="380" y="569" text-anchor="middle">AlertsTopic</text></g>
+              <g class="nd"><rect class="sh" x="519" y="524" width="160" height="66" rx="6"/><rect class="box" x="515" y="520" width="160" height="66" rx="6"/>
+                <text class="t sm" x="595" y="548" text-anchor="middle">λ monitor</text><text class="s" x="595" y="569" text-anchor="middle">probes + alerts</text></g>
+              <g class="nd"><rect class="sh" x="724" y="524" width="115" height="66" rx="6"/><rect class="box" x="720" y="520" width="115" height="66" rx="6"/>
+                <text class="t xs" x="777" y="548" text-anchor="middle">EventBridge</text><text class="s" x="777" y="569" text-anchor="middle">every minute</text></g>
+              <g class="nd"><rect class="sh" x="854" y="524" width="115" height="66" rx="6"/><rect class="box" x="850" y="520" width="115" height="66" rx="6"/>
+                <text class="t xs" x="907" y="548" text-anchor="middle">CloudWatch</text><text class="s" x="907" y="569" text-anchor="middle">logs · alarms</text></g>
+            </svg>
+          </div>
+          <figcaption class="arch-legend">
+            <span><svg viewBox="0 0 40 10" aria-hidden="true"><path class="lg-run" d="M2 5H38"/></svg>While people play</span>
+            <span><svg viewBox="0 0 40 10" aria-hidden="true"><path class="lg-dep" d="M2 5H38"/></svg>When you deploy</span>
+            <span class="arch-hint">Scroll sideways to see the whole diagram.</span>
+          </figcaption>
+        </figure>
+        <div class="prose">
+          <p>Read it from the left. At deploy time your computer packages the backend code, SAM uploads the zip to an artifact bucket, and CloudFormation builds the stack. Then a script copies the website files from <code>public/</code> into the stack's S3 bucket. At play time a browser loads those files from S3, calls the HTTP API for things like logging in and leaderboards, and holds a WebSocket open for the game itself. Lambda functions do the work and keep every bit of state in DynamoDB, because a function forgets everything when it finishes.</p>
+          <p>Along the bottom is the safety net: EventBridge runs the monitor function every minute to load the site, call the API and open a WebSocket. CloudWatch alarms call the same function when errors or throttling show up, and it emails you through SNS.</p>
+        </div>
+      </section>
+
+      <!-- ================= B. CONCEPTS ================= -->
+      <section class="part" id="concepts">
+        <div class="st-head">
+          <p class="eyebrow">Part B</p>
+          <h2>The AWS pieces, and what each does here</h2>
+          <p>You don't need to know these services before you start, but the steps make more sense once you know what you're creating. Each card says what the service is in general and exactly how Quibble's template uses it.</p>
+        </div>
+        <div class="concepts">
+          <article class="card pad concept">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>CloudFormation and SAM</h3>
+            <p><b>What it is.</b> Infrastructure as code. You describe resources in a template and CloudFormation creates, updates or deletes them together, in the right order, rolling back if something fails. SAM (Serverless Application Model) is shorthand on top: one <code>AWS::Serverless::Function</code> line becomes a Lambda function, its IAM role and its triggers.</p>
+            <p><b>In Quibble.</b> <code>aws/template.yaml</code> starts with <code>Transform: AWS::Serverless-2016-10-31</code>, which tells CloudFormation to expand the SAM shorthand. The SAM CLI's <code>sam build</code> and <code>sam deploy</code> package the code and hand the template over. The stack's <b>outputs</b> (the site link, the API addresses, the table names) are how the other scripts find what was created.</p>
+          </article>
+          <article class="card pad concept">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>AWS Lambda</h3>
+            <p><b>What it is.</b> Functions that run when something calls them, then stop. You pay per request and per millisecond of run time, and nothing while idle. Each run starts with no memory of the last one.</p>
+            <p><b>In Quibble.</b> Six Node.js 22 functions on arm64: <code>api</code>, <code>ws-connect</code>, <code>ws-message</code>, <code>ws-disconnect</code>, <code>game-timer</code> and <code>monitor</code>. Lambda has no <code>setTimeout</code> that outlives a request, so <code>game-timer</code> is invoked asynchronously with each deadline and schedules the next one. All of them share the account's <b>concurrency</b> quota: how many copies may run at the same moment in a region (step 6).</p>
+          </article>
+          <article class="card pad concept wide">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API Gateway: HTTP API and WebSocket API</h3>
+            <p><b>What it is.</b> The front door that turns internet traffic into Lambda calls, with throttling built in. Quibble uses both kinds it offers:</p>
+            <div class="cmp-scroll">
+              <table class="cmp stack">
+                <thead><tr><th scope="col"></th><th scope="col">HTTP API</th><th scope="col">WebSocket API</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">Connection</th><td data-label="HTTP API">One request, one response, then it's over</td><td data-label="WebSocket API">Stays open for the whole game</td></tr>
+                  <tr><th scope="row">Who can speak</th><td data-label="HTTP API">Only the browser starts a conversation</td><td data-label="WebSocket API">The server can push to the browser at any time</td></tr>
+                  <tr><th scope="row">Routes</th><td data-label="HTTP API"><code>/api/{proxy+}</code>: every path goes to <code>api</code>, which has its own route table</td><td data-label="WebSocket API"><code>$connect</code>, <code>$default</code>, <code>$disconnect</code>, each with its own function</td></tr>
+                  <tr><th scope="row">Used for</th><td data-label="HTTP API">Sign-up, login, leaderboards, history, the admin console</td><td data-label="WebSocket API">Joining, the countdown, answers, results, reactions</td></tr>
+                  <tr><th scope="row">Billed per</th><td data-label="HTTP API">Request</td><td data-label="WebSocket API">Message, plus connection minutes</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p><b>The trick worth knowing.</b> Lambda can't hold a socket open, so API Gateway holds it. A function that wants to tell 250 players "next question" calls the API Gateway Management API (<code>PostToConnection</code>) once per socket. The template caps both APIs at 1,000 requests a second with bursts of 2,000.</p>
+          </article>
+          <article class="card pad concept">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>Amazon DynamoDB</h3>
+            <p><b>What it is.</b> A key-value database with no server to size. Every item lives under a partition key, and each key handles about 1,000 writes a second. On-demand billing charges per read and write.</p>
+            <p><b>In Quibble.</b> Nine tables, all <code>PAY_PER_REQUEST</code>. Time to live (TTL) deletes old games, sockets and rate-limit counters for free. Users and Questions have point-in-time recovery switched on, so you can restore them to any second in the last 35 days.</p>
+          </article>
+          <article class="card pad concept">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>Amazon S3 static hosting</h3>
+            <p><b>What it is.</b> Object storage. A bucket can serve files straight to browsers if its bucket policy allows public reads.</p>
+            <p><b>In Quibble.</b> <code>FrontendBucket</code> holds the HTML, CSS and JavaScript, and <code>FrontendBucketPolicy</code> lets anyone read (never write) them. Players use the HTTPS address <code>https://&lt;bucket&gt;.s3.&lt;region&gt;.amazonaws.com/index.html</code>. That address has no index page, so links always name a file. S3 can't send security headers, which is why each page carries its Content-Security-Policy in a <code>&lt;meta&gt;</code> tag.</p>
+          </article>
+          <article class="card pad concept">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>AWS IAM</h3>
+            <p><b>What it is.</b> Who may do what. <b>Users</b> are people (you, at the command line). <b>Roles</b> are worn by services, so a Lambda function gets temporary permissions without any stored password.</p>
+            <p><b>In Quibble.</b> Each function's <code>Policies</code> list becomes its own role. <code>ws-connect</code>, for example, can only read the Users table and read or write the Connections table. Because the template creates roles, the deploy passes <code>--capabilities CAPABILITY_IAM</code>, your explicit "yes, I know this stack creates IAM roles".</p>
+          </article>
+          <article class="card pad concept">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/></svg>CloudWatch, EventBridge and SNS</h3>
+            <p><b>What they are.</b> CloudWatch collects logs and metrics and raises alarms. EventBridge runs things on a schedule or when an AWS event happens. SNS (Simple Notification Service) delivers a message to every subscriber of a topic, here by email.</p>
+            <p><b>In Quibble.</b> Log groups kept for 14 days (the <code>LogRetentionDays</code> parameter), 14 alarms, a dashboard and custom metrics in the <code>Quibble</code> namespace. EventBridge runs <code>monitor</code> every minute and whenever a deploy of this stack fails; <code>monitor</code> writes the email and publishes it to <code>AlertsTopic</code>.</p>
+          </article>
+        </div>
+      </section>
+
+      <!-- ================= C. COSTS ================= -->
+      <section class="part" id="costs">
+        <div class="st-head">
+          <p class="eyebrow">Part C</p>
+          <h2>What it costs</h2>
+          <p>Almost everything is pay-per-use, so a stack nobody is playing on costs very little. The prices below are <b>approximate</b>: they vary by region and change over time, so check the AWS pricing pages or the AWS Pricing Calculator for your region.</p>
+        </div>
+        <div class="card pad">
+          <dl class="costs">
+            <div><dt>Sitting idle</dt><dd>Roughly under a dollar a month (approximate). One thing always runs: the uptime monitor, about 43,000 small Lambda runs a month, which fit in Lambda's free allowance, plus as many HTTP API calls, WebSocket handshakes and S3 page loads, which come to a few cents. CloudWatch charges about $0.10 a month for each alarm beyond the first 10, and the stack has 14.</dd></div>
+            <div><dt>A game</dt><dd>A 10-question game with 5 players costs a fraction of a cent (approximate). Lambda, API Gateway and on-demand DynamoDB charge per request, and a game is a few thousand small requests.</dd></div>
+            <div><dt>Free allowances</dt><dd>Lambda, DynamoDB and SNS email (1,000 a month) have monthly free allowances, and newer accounts may also get free-tier credits. What applies depends on when your account was created; the Billing console shows it.</dd></div>
+            <div><dt>What can surprise you</dt><dd>A forgotten test stack, a script that logs errors in a loop (CloudWatch charges for log data stored and ingested), or a big event. Step 1's budget alarm is there so a surprise reaches your inbox in days, not on the monthly bill.</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <!-- ================= STEPS ================= -->
+      <div class="shell-bar card" id="shell-bar">
+        <div>
+          <p class="kicker">Before the steps</p>
+          <p>Commands that differ between terminals come in two versions. Pick yours and the guide shows only that one. On Windows, PowerShell and Git Bash both work. On macOS or Linux, pick bash (zsh is the same here).</p>
+        </div>
+        <div class="seg" role="group" aria-label="Show commands for">
+          <button type="button" data-shell-pick="ps" aria-pressed="true">PowerShell</button>
+          <button type="button" data-shell-pick="sh" aria-pressed="false">bash</button>
+        </div>
+      </div>
+
+      <!-- STEP 1 -->
+      <section class="step card" id="step-account" data-step="account">
+        <header class="step-head">
+          <div><p class="kicker">Step 1 of 11</p><h2>Protect your account first</h2></div>
+          <label class="done"><input type="checkbox" data-step="account"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>Before you create anything, make the account safe to experiment in. All of this is in the AWS console in your browser.</p>
+          <ol class="tasks">
+            <li><b>Lock away the root user.</b> The email address you signed up with is the <i>root user</i>, which can do anything, including close the account. Sign in as root once, open <b>Security credentials</b> and turn on multi-factor authentication (MFA). Never create access keys for root.</li>
+            <li><b>Set a budget alarm.</b> In <b>Billing and Cost Management</b>, open <b>Budgets</b>, choose <b>Create budget</b> and use a template: <b>Zero spend budget</b> emails you as soon as anything costs money, or <b>Monthly cost budget</b> with a small amount such as $5.</li>
+            <li><b>Create an IAM user for yourself.</b> In <b>IAM</b>, choose <b>Users</b>, then <b>Create user</b>, give it console access and attach the <code>AdministratorAccess</code> policy. Sign in as that user from now on and turn on MFA for it too.</li>
+            <li><b>Create an access key for the command line.</b> On your new user's <b>Security credentials</b> tab, choose <b>Create access key</b> with the <b>Command Line Interface (CLI)</b> use case. Keep the window open: step 4 needs both values, and the secret is shown only once.</li>
+          </ol>
+          <div class="callout warn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Treat the access key like a password</p>
+            <p>Anyone with it can run up a bill in your name. Never paste it into code, a commit, a chat or a screenshot. Quibble's <code>.gitignore</code> already keeps <code>.env</code> and <code>aws/.jwt-secret</code> out of git; keep it that way. If a key leaks, deactivate it in IAM straight away.</p>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Root user vs IAM identities, and MFA.</b> AWS has no spending cap: a budget warns you, it doesn't stop anything. <code>AdministratorAccess</code> is broad, but deploying this stack means creating IAM roles, so the deployer needs wide rights; in a team you'd use a separate sandbox account or a tighter policy. AWS IAM Identity Center (single sign-on) is the more modern way to sign in, and the scripts support it too (step 4).</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 2 -->
+      <section class="step card" id="step-region" data-step="region">
+        <header class="step-head">
+          <div><p class="kicker">Step 2 of 11</p><h2>Pick a region</h2></div>
+          <label class="done"><input type="checkbox" data-step="region"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>A region is a group of AWS data centres in one part of the world, named like <code>us-east-1</code>, <code>eu-west-1</code> or <code>ap-south-1</code>. The whole Quibble stack lives in one region, so pick the one closest to your players: every answer travels to it and back.</p>
+          <p>Write the region code down. You'll make it your default in step 4, and the deploy, the quota check and the seed script all use that default.</p>
+          <div class="callout tip">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>The console has a region picker too</p>
+            <p>It sits at the top right of every console page. If you ever "lose" your stack, functions or tables, you're almost always looking at the wrong region.</p>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Regions are separate.</b> Most resources (functions, tables, APIs) and most quotas are per region, and prices differ a little between regions. IAM and billing are global: one user and one budget cover every region.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 3 -->
+      <section class="step card" id="step-tools" data-step="tools">
+        <header class="step-head">
+          <div><p class="kicker">Step 3 of 11</p><h2>Install the tools</h2></div>
+          <label class="done"><input type="checkbox" data-step="tools"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>Four programs, all free:</p>
+          <ul class="tools">
+            <li><b>Git</b>, to download the code. On Windows, Git for Windows from <a href="https://git-scm.com/" rel="noopener">git-scm.com</a> also installs Git Bash.</li>
+            <li><b>Node.js 22 or newer</b> from <a href="https://nodejs.org/" rel="noopener">nodejs.org</a> (the LTS version is fine). The deploy scripts and the backend are JavaScript; <code>package.json</code> asks for Node 22+.</li>
+            <li><b>AWS CLI version 2</b>, the general command line for AWS. On Windows, run the installer below or download it from the <a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" rel="noopener">AWS CLI install guide</a>, which also covers macOS and Linux.</li>
+            <li><b>AWS SAM CLI 1.123 or newer</b>, which builds and deploys the template. On Windows, download the 64-bit installer from the <a href="https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html" rel="noopener">SAM CLI install guide</a>. Older versions can't deploy the game timer's <code>RecursiveLoop</code> setting.</li>
+          </ul>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell · Windows only</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code># installs the AWS CLI v2 from Amazon's official installer
+msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2.msi</code></pre>
+          </div>
+          <p>Then <b>open a new terminal</b>, so it picks up the updated PATH, and check that all four answer:</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>git --version
+node --version     # v22 or newer
+aws --version      # aws-cli/2...
+sam --version      # 1.123.0 or newer</code></pre>
+          </div>
+          <div class="callout tip">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>No Docker needed for this</p>
+            <p>Docker is only for running Quibble on your laptop with DynamoDB Local (the "Play locally" card on <a href="/how-it-works.html#run">How it works</a>). Deploying doesn't use it.</p>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Two command lines with different jobs.</b> <code>aws</code> can call any AWS API, one request at a time. <code>sam</code> works at the level of a whole application: it builds the function code and drives CloudFormation. Quibble's own scripts use a third route, the AWS SDK for JavaScript, which reads the same credentials as both.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 4 -->
+      <section class="step card" id="step-configure" data-step="configure">
+        <header class="step-head">
+          <div><p class="kicker">Step 4 of 11</p><h2>Connect the CLI to your account</h2></div>
+          <label class="done"><input type="checkbox" data-step="configure"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>Give the CLI the access key from step 1 and the region from step 2. It asks four questions; answer <code>json</code> to the last one.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>aws configure
+aws sts get-caller-identity</code></pre>
+          </div>
+          <p>The second command asks AWS "who am I?". The answer should name your IAM user, not root:</p>
+          <div class="term out">
+            <div class="term-bar"><span class="term-label">Example output</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>{
+    "UserId": "AIDAEXAMPLEUSERID",
+    "Account": "111122223333",
+    "Arn": "arn:aws:iam::111122223333:user/your-user-name"
+}</code></pre>
+          </div>
+          <p>Using IAM Identity Center instead of an access key? Run <code>aws configure sso</code> once, <code>aws sso login</code> whenever the session expires, and point every terminal at the profile you created:</p>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>$env:AWS_PROFILE = "your-profile-name"</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>export AWS_PROFILE=your-profile-name</code></pre>
+            </div>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Where credentials live.</b> <code>aws configure</code> writes two small files in the <code>.aws</code> folder of your home directory: <code>credentials</code> (the key) and <code>config</code> (the region). The CLI, the SAM CLI and the AWS SDK used by Quibble's scripts all read them, unless environment variables such as <code>AWS_PROFILE</code> or <code>AWS_REGION</code> in the current terminal say otherwise. That lookup order is called the credential provider chain.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 5 -->
+      <section class="step card" id="step-code" data-step="code">
+        <header class="step-head">
+          <div><p class="kicker">Step 5 of 11</p><h2>Get the code and choose the admin login</h2></div>
+          <label class="done"><input type="checkbox" data-step="code"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>Download the repository and install its packages. If you plan to change the game, fork it on GitHub first and clone your fork instead.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>git clone https://github.com/Yash19k/quibble.git
+cd quibble
+npm install</code></pre>
+          </div>
+          <p><code>npm install</code> installs the deploy tools at the top level, then its <code>postinstall</code> step installs the Lambda functions' own packages in <code>aws/backend</code>. Next, copy the example settings file:</p>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>Copy-Item .env.example .env</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>cp .env.example .env</code></pre>
+            </div>
+          </div>
+          <p>Open <code>.env</code> in any editor and set the admin account that step 9 will create. Use your own email and a password of at least 10 characters:</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">In the .env file</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>ADMIN_EMAIL=you@example.com
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=a-long-password-only-you-know
+
+# Optional: a different CloudFormation stack name (default: quibble)
+# QUIBBLE_STACK=quibble</code></pre>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Configuration stays out of the code.</b> <code>.env</code> holds settings that differ per person and must never be shared, so git ignores it; <code>.env.example</code> is the safe, committed template. The other lines in it only affect the local dev server (on AWS the same settings are template parameters, see <a href="#update">Ship updates</a>).</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 6 -->
+      <section class="step card" id="step-quota" data-step="quota">
+        <header class="step-head">
+          <div><p class="kicker">Step 6 of 11</p><h2>Ask AWS to raise the Lambda quota</h2></div>
+          <label class="done"><input type="checkbox" data-step="quota"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>New AWS accounts may run only <b>10</b> Lambda functions at the same moment per region, shared by every function. That's plenty for trying Quibble with a few friends, but in a full room 250 players answer within the same fraction of a second and queue behind those 10 slots. The AWS standard is 1,000, raising it is free, and it's usually approved within a day, so ask now and keep going while you wait.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run quota:lambda                # the current value and any open request
+npm run quota:lambda -- --request   # ask for 1,000 (Service Quotas code L-B99A9384)</code></pre>
+          </div>
+          <div class="term out">
+            <div class="term-bar"><span class="term-label">Example output</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>Lambda concurrent executions in eu-west-1: 10 (AWS standard: 1000)
+
+Request the standard 1000 with:  npm run quota:lambda -- --request</code></pre>
+          </div>
+          <p>AWS emails the account owner when it decides; run <code>npm run quota:lambda</code> again to check. Until then the game still works, just with slower phase changes in big rooms. To soften that, deploy with a longer grace period for late answers (<code>npm run deploy -- LateGraceMs=5000</code> in step 8) and set it back to the default 1500 after the raise.</p>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Service quotas and concurrency.</b> Every AWS service has limits per account and region; some can be raised on request through Service Quotas. Lambda <i>concurrency</i> is how many copies of your functions run at once. When it's full, new calls are throttled (refused), and Quibble's page resends them with backoff, so nothing is lost but things slow down. The template deliberately reserves no concurrency for any function: a reservation carves slots out of the shared pool, and isn't possible at all on a 10-slot account.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 7 -->
+      <section class="step card" id="step-preflight" data-step="preflight">
+        <header class="step-head">
+          <div><p class="kicker">Step 7 of 11</p><h2>Run the preflight check</h2></div>
+          <label class="done"><input type="checkbox" data-step="preflight"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>The preflight script checks everything the earlier steps set up, without changing anything: the SAM CLI version, that your credentials work and a region is set, the Lambda quota (it wants 500 or more), and, once a stack exists, whether any games are live on it.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run preflight</code></pre>
+          </div>
+          <div class="term out">
+            <div class="term-bar"><span class="term-label">Example output, quota not raised yet</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>Quibble preflight
+  [ok]   AWS SAM CLI 1.140.0
+  [ok]   AWS credentials: account 111122223333 (arn:aws:iam::111122223333:user/your-user-name)
+  [ok]   Region: eu-west-1
+  [FAIL] Lambda concurrency quota is 10. A 250-player game needs 500 or more (the AWS standard is 1000).
+         Ask AWS for the standard 1000 (free; usually approved within a day):
+           npm run quota:lambda -- --request
+         ...
+  [ok]   Stack "quibble" is not deployed yet (nothing live to disturb).
+
+Preflight failed: 1 problem(s) above.</code></pre>
+          </div>
+          <p>Fix every <code>[FAIL]</code> it reports; each one prints a hint underneath. The quota is the one exception you may accept for now: <code>npm run preflight -- --allow-degraded</code> turns that failure into a warning. You don't strictly have to pass preflight to deploy, because <code>npm run deploy</code> runs it again first in a warn-only mode that never stops the deploy.</p>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Check before you change.</b> Every check is a read-only API call: STS <code>GetCallerIdentity</code> for "who am I", Lambda <code>GetAccountSettings</code> for the quota, a DynamoDB scan of the Games table for live games. Finding problems this way is cheaper than finding them halfway through a deploy, and it's the habit to keep before every event.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 8 -->
+      <section class="step card" id="step-deploy" data-step="deploy">
+        <header class="step-head">
+          <div><p class="kicker">Step 8 of 11</p><h2>Deploy</h2></div>
+          <label class="done"><input type="checkbox" data-step="deploy"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>One command does all of it. The first deploy takes a few minutes while CloudFormation creates several dozen resources.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run deploy</code></pre>
+          </div>
+          <p>To deploy to a region other than your default, set it for this terminal first:</p>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>$env:AWS_REGION = "eu-west-1"
+npm run deploy</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>AWS_REGION=eu-west-1 npm run deploy</code></pre>
+            </div>
+          </div>
+          <h3 class="sub-h">What <code>npm run deploy</code> does, in order</h3>
+          <ol class="flow">
+            <li><b>Preflight, warn-only.</b> The same report as step 7. It never stops the deploy.</li>
+            <li><b>The login secret.</b> Login tokens are signed with a secret. The first deploy generates a random one and saves it in <code>aws/.jwt-secret</code> (git-ignored); later deploys reuse it, so players stay logged in. It also names the flag images, so the file name doesn't give a flag question's answer away.</li>
+            <li><b><code>sam build</code></b> copies <code>aws/backend</code> into <code>aws/.aws-sam/build</code> and installs its production packages, ready to zip.</li>
+            <li><b><code>sam deploy</code></b> uploads the zips and the template, and CloudFormation works out a <b>change set</b>, the list of resources to create, change or delete, then applies it.</li>
+            <li><b>Publish the website</b> (<code>aws/scripts/publish-frontend.mjs</code>). It reads the stack's outputs, writes <code>config.js</code> with your two API addresses, narrows each page's Content-Security-Policy to exactly those two hosts, uploads <code>public/</code> to the bucket, deletes files that no longer exist locally, and prints your link.</li>
+          </ol>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">What deploy.mjs runs for you, in the aws folder</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>sam build
+sam deploy --stack-name quibble --resolve-s3 --capabilities CAPABILITY_IAM \
+  --no-fail-on-empty-changeset --parameter-overrides JwtSecret=**** [your Name=value pairs]</code></pre>
+          </div>
+          <dl class="flags">
+            <div><dt><code>--stack-name quibble</code></dt><dd>The stack's name, from <code>QUIBBLE_STACK</code> if you set it.</dd></div>
+            <div><dt><code>--resolve-s3</code></dt><dd>Let SAM create (once per region) and use its own bucket for the uploaded code, in a stack called <code>aws-sam-cli-managed-default</code>.</dd></div>
+            <div><dt><code>--capabilities CAPABILITY_IAM</code></dt><dd>Your consent that the template creates IAM roles. CloudFormation refuses without it.</dd></div>
+            <div><dt><code>--no-fail-on-empty-changeset</code></dt><dd>A redeploy with nothing changed counts as success, not an error.</dd></div>
+            <div><dt><code>--parameter-overrides</code></dt><dd>Values for the template's <code>Parameters</code>: the secret, plus anything you add after <code>npm run deploy --</code>.</dd></div>
+          </dl>
+          <p>At the end it prints the link to share. Keep the terminal output; you'll need the API addresses in step 11.</p>
+          <div class="term out">
+            <div class="term-bar"><span class="term-label">Example output, the last lines</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>Frontend published. Share this link with players:
+  https://&lt;bucket&gt;.s3.&lt;region&gt;.amazonaws.com/index.html
+
+First deploy? Run "npm run seed" to create the admin account and sample questions.</code></pre>
+          </div>
+          <p>Lost it? The stack's outputs are always there to read back. This lists <code>WebsiteUrl</code>, <code>HttpApiUrl</code>, <code>WebSocketUrl</code>, <code>FrontendBucketName</code>, <code>DashboardUrl</code> and the rest:</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>aws cloudformation describe-stacks --stack-name quibble --query "Stacks[0].Outputs" --output table</code></pre>
+          </div>
+          <div class="callout warn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Back up aws/.jwt-secret</p>
+            <p>If it's lost (a new laptop, a fresh clone), the next deploy makes a new one: everyone is logged out and the flag images get new names. Copy it somewhere private, next to your password manager, not into git.</p>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Infrastructure as code and stack outputs.</b> You never clicked "create table" nine times: the template is the source of truth, and CloudFormation makes the account match it. Watch it happen in the CloudFormation console under <b>Stacks</b>, then <b>quibble</b>, then <b>Events</b>. The API addresses don't exist until the deploy creates them, which is why the website gets a generated <code>config.js</code> instead of hard-coded URLs, and why the same code works for anyone's copy.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 9 -->
+      <section class="step card" id="step-seed" data-step="seed">
+        <header class="step-head">
+          <div><p class="kicker">Step 9 of 11</p><h2>Create the admin account and load questions</h2></div>
+          <label class="done"><input type="checkbox" data-step="seed"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>The tables start empty. The seed script creates the admin account from your <code>.env</code> and loads the sample question bank (12 categories). Only the first deploy needs it.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run seed</code></pre>
+          </div>
+          <div class="term out">
+            <div class="term-bar"><span class="term-label">Example output</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>Created admin: you@example.com
+Added &lt;n&gt; new questions (0 already existed).</code></pre>
+          </div>
+          <div class="callout warn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>It may generate the password for you</p>
+            <p>Your site is public, so the script refuses weak passwords. If <code>ADMIN_PASSWORD</code> is missing, still the example value, or shorter than 10 characters, it generates a strong one and prints it once with "save it now". Save it: running seed again won't change an existing admin's password.</p>
+          </div>
+          <p>Running it again is safe: it makes sure the account still has the admin role and adds only questions that aren't there yet. Now open your <code>WebsiteUrl</code>, log in with the admin email and password, and choose <b>Admin</b> in the game header to reach <code>admin.html</code>: live games, players, the question bank, an announcement banner and system health.</p>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Your credentials can reach the data directly.</b> The seed doesn't go through the website or the API. It runs on your computer, finds the Users and Questions table names in the stack outputs, hashes the password with bcrypt locally and writes straight to DynamoDB with your IAM user's permissions. The Lambda functions do the same thing with their roles' narrower permissions.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 10 -->
+      <section class="step card" id="step-alerts" data-step="alerts">
+        <header class="step-head">
+          <div><p class="kicker">Step 10 of 11 · optional</p><h2>Turn on email alerts</h2></div>
+          <label class="done"><input type="checkbox" data-step="alerts"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <p>The alarms and uptime probes already run; they just have nobody to tell. Give the stack an address with the <code>AlertEmail</code> parameter and, if you like, a time zone (an IANA name such as <code>Europe/London</code>; the default is UTC) for the times in the emails:</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run deploy -- AlertEmail=you@example.com AlertTimeZone=Europe/London</code></pre>
+          </div>
+          <p>AWS then sends that address an email titled "AWS Notification - Subscription Confirmation". Click <b>Confirm subscription</b> in it (check spam), then send yourself a test:</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run alerts:test   # sends a test email and says whether the address has confirmed</code></pre>
+          </div>
+          <p>From then on you get an email when the site, the API or the WebSockets stop answering (and when they're back), when errors are logged, when Lambda or DynamoDB throttle, when a deploy fails or rolls back, and on sensitive admin actions such as a ban, a password reset or a new admin.</p>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Template parameters and conditions, plus pub/sub.</b> The template only creates the email subscription when <code>AlertEmail</code> isn't empty (its <code>HasAlertEmail</code> condition). Parameters you pass stay set for later deploys until you change them. SNS asks for confirmation so nobody can sign a stranger up for email, and any number of addresses can subscribe to the same topic (the <code>AlertsTopicArn</code> output) in the SNS console.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 11 -->
+      <section class="step card" id="step-verify" data-step="verify">
+        <header class="step-head">
+          <div><p class="kicker">Step 11 of 11</p><h2>Check that it works</h2></div>
+          <label class="done"><input type="checkbox" data-step="verify"><span class="box" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Done</label>
+        </header>
+        <div class="step-body">
+          <ol class="tasks">
+            <li><b>Ask the API if it's healthy.</b> <code>/api/health</code> reads DynamoDB, so an answer of <code>ok: true</code> proves API Gateway, Lambda and the database all work. Use the <code>HttpApiUrl</code> output.</li>
+          </ol>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>Invoke-RestMethod "&lt;HttpApiUrl&gt;/api/health"</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>curl "&lt;HttpApiUrl&gt;/api/health"</code></pre>
+            </div>
+          </div>
+          <ol class="tasks" start="2">
+            <li><b>Play a real game.</b> Open your <code>WebsiteUrl</code> (it must end in a file name such as <code>/index.html</code>), host a game, and join it with the six-letter code from a private window or your phone.</li>
+            <li><b>Look at it from the inside.</b> Open the <code>DashboardUrl</code> output for the CloudWatch dashboard, and the admin console's System health page for response times and table sizes.</li>
+            <li><b>Optional: run the end-to-end tests against it.</b> These play full games over real WebSockets, using the <code>HttpApiUrl</code> and <code>WebSocketUrl</code> outputs and your admin login.</li>
+          </ol>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>$env:QA_API = "&lt;HttpApiUrl&gt;"
+$env:QA_WS = "&lt;WebSocketUrl&gt;"
+$env:ADMIN_EMAIL = "&lt;admin email&gt;"
+$env:ADMIN_PASSWORD = "&lt;admin password&gt;"
+$env:QA_SKIP_FULL = "1"   # skip the test that signs up about 250 accounts
+npm run test:e2e</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code># QA_SKIP_FULL=1 skips the test that signs up about 250 accounts
+QA_API="&lt;HttpApiUrl&gt;" QA_WS="&lt;WebSocketUrl&gt;" ADMIN_EMAIL="&lt;admin email&gt;" \
+  ADMIN_PASSWORD="&lt;admin password&gt;" QA_SKIP_FULL=1 npm run test:e2e</code></pre>
+            </div>
+          </div>
+          <div class="callout warn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>The tests leave things behind</p>
+            <p>They sign up test players and add a "Load Test" question category through the admin API. That's fine on a fresh copy, but on a site people already use, run them against a separate test stack instead (see <a href="#update">Ship updates</a>).</p>
+          </div>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Verify each layer, from the outside in.</b> The health call checks the back end without the website; the game checks everything together; the dashboard shows what happened underneath. It's the same three-part probe the monitor function runs every minute: load the page, call <code>/api/health</code>, open a WebSocket.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= D. TROUBLESHOOTING ================= -->
+      <section class="part" id="trouble">
+        <div class="st-head">
+          <p class="eyebrow">Part D</p>
+          <h2>Troubleshooting</h2>
+          <p>The messages below are the ones Quibble's scripts and AWS actually print. Open the one you're seeing.</p>
+        </div>
+        <div class="faq">
+          <details class="card" id="t-sam">
+            <summary><span>"AWS SAM CLI not found" or "sam is not recognized"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>The SAM CLI isn't installed, or this terminal was open before you installed it. Install it (step 3), close every terminal, open a new one and run <code>sam --version</code>. The same goes for <code>aws</code>.</p></div>
+          </details>
+          <details class="card" id="t-sam-old">
+            <summary><span>"AWS SAM CLI 1.x is too old; 1.123.0 or newer is needed"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>The game timer uses Lambda's <code>RecursiveLoop: Allow</code> setting (each timer schedules the next one, and without it Lambda stops the chain after about 16 hops, mid-game). Older SAM versions don't know that property. Install the latest SAM CLI over the old one.</p></div>
+          </details>
+          <details class="card" id="t-ps-scripts">
+            <summary><span>PowerShell: "npm.ps1 cannot be loaded because running scripts is disabled"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body">
+              <p>Windows blocks PowerShell scripts by default, and npm installs itself as one. Allow scripts you've installed locally for your user only, or use Git Bash instead:</p>
+              <div class="term">
+                <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+                <pre class="code"><code>Set-ExecutionPolicy -Scope CurrentUser RemoteSigned</code></pre>
+              </div>
+            </div>
+          </details>
+          <details class="card" id="t-region">
+            <summary><span>"No AWS region set" or "AWS credentials don't work"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>Run <code>aws configure</code> again (step 4) and check <code>aws sts get-caller-identity</code> answers. With Identity Center, the session has expired: run <code>aws sso login</code>, and make sure <code>AWS_PROFILE</code> is set in this terminal. An <code>AWS_REGION</code> or <code>AWS_PROFILE</code> set earlier in the same terminal wins over your saved defaults.</p></div>
+          </details>
+          <details class="card" id="t-stack">
+            <summary><span>"Could not read stack "quibble" ... Did you run "npm run deploy"? Is your AWS region set?"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>The seed, publish and alerts scripts find your resources through the stack's outputs. This means they looked in a region or under a stack name where it doesn't exist. Use the same region you deployed to, and if you deployed with <code>QUIBBLE_STACK</code>, set it again in this terminal (or in <code>.env</code>).</p></div>
+          </details>
+          <details class="card" id="t-bucket">
+            <summary><span>The deploy fails on FrontendBucketPolicy, or the site shows an XML "AccessDenied" page</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body">
+              <p>S3 <b>Block Public Access</b> is switched on for your whole account, and it overrides the bucket's own setting. In the S3 console, open <b>Block Public Access settings for this account</b> and turn off "Block public access to buckets and objects granted through <i>new</i> public bucket policies" (for the failed deploy) and "... through <i>any</i> public bucket policies" (for AccessDenied on a deployed site). Then deploy again. The template itself still blocks public ACLs; only the read-only bucket policy needs this.</p>
+              <p>Also check the address ends in a file name: <code>https://&lt;bucket&gt;.s3.&lt;region&gt;.amazonaws.com/</code> on its own has no index page and answers with an XML error.</p>
+            </div>
+          </details>
+          <details class="card" id="t-rollback">
+            <summary><span>"Stack is in ROLLBACK_COMPLETE state and can not be updated"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body">
+              <p>The very first deploy failed, and CloudFormation rolled back by deleting what it had made. A stack in that state can only be deleted. Find the first failed resource under the stack's <b>Events</b> tab in the CloudFormation console, fix the cause, then delete the empty stack and deploy again:</p>
+              <div class="term">
+                <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+                <pre class="code"><code>sam delete --stack-name quibble
+npm run deploy</code></pre>
+              </div>
+            </div>
+          </details>
+          <details class="card" id="t-slow">
+            <summary><span>Big games feel slow, or answers in the last second are refused</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>Almost always the Lambda concurrency quota is still 10. Check with <code>npm run quota:lambda</code>, request the raise (step 6) and meanwhile deploy with <code>npm run deploy -- LateGraceMs=5000</code>. The dashboard's Lambda throttles graph and the <code>quibble-lambda-throttles</code> alarm confirm it.</p></div>
+          </details>
+          <details class="card" id="t-secret">
+            <summary><span>"No JWT secret (aws/.jwt-secret or JWT_SECRET)" when running npm run publish</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>This copy of the repository has never deployed, so it has no secret to name the flag images with. If the stack already exists, copy <code>aws/.jwt-secret</code> from the computer that deployed it. Running <code>npm run deploy</code> instead creates a new secret, which logs every player out.</p></div>
+          </details>
+          <details class="card" id="t-alerts">
+            <summary><span>npm run alerts:test says "No address is subscribed" or "NOT confirmed yet"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>Deploy with <code>AlertEmail=</code> set (step 10), then find the "AWS Notification - Subscription Confirmation" email, look in spam too, and click <b>Confirm subscription</b>. SNS sends nothing to an unconfirmed address.</p></div>
+          </details>
+          <details class="card" id="t-deps">
+            <summary><span>"Missing a dependency ... Run "npm install" in the project folder"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>The scripts load the AWS SDK from the project's packages. Run <code>npm install</code> in the <code>quibble</code> folder (the one with <code>package.json</code>), not inside <code>aws/</code>.</p></div>
+          </details>
+          <details class="card" id="t-live">
+            <summary><span>Preflight warns "live game(s) ... Deploying now can disturb them"</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <div class="faq-body"><p>A deploy swaps function code and settings under running games. Wait until they finish, or end them from the admin console's Live games page, then deploy.</p></div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ================= E. UPDATES ================= -->
+      <section class="part" id="update">
+        <div class="st-head">
+          <p class="eyebrow">Part E</p>
+          <h2>Ship updates</h2>
+          <p>Changed some code, or pulled the latest version? Deploying again is the same command. CloudFormation compares the template with what exists and changes only the difference, so your tables and their data stay put.</p>
+        </div>
+        <div class="card pad prose">
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run deploy     # code, template or settings changed
+npm run publish    # only files in public/ changed: just re-upload the website</code></pre>
+          </div>
+          <h3 class="sub-h">Change a setting</h3>
+          <p>Template parameters go after <code>--</code> as <code>Name=value</code> and stay set for later deploys until you change them:</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>npm run deploy -- LateGraceMs=5000 MaxPlayers=250</code></pre>
+          </div>
+          <div class="cmp-scroll">
+            <table class="cmp params stack">
+              <thead><tr><th scope="col">Parameter</th><th scope="col">Default</th><th scope="col">What it does</th></tr></thead>
+              <tbody>
+                <tr><td><code>MaxPlayers</code></td><td data-label="Default">250</td><td>Most players one game accepts (1 to 1,000; load-tested at 250)</td></tr>
+                <tr><td><code>LateGraceMs</code></td><td data-label="Default">1500</td><td>How long after the buzzer an answer that reached API Gateway still counts (1 to 10,000 ms)</td></tr>
+                <tr><td><code>RevealMs</code></td><td data-label="Default">4000</td><td>Pause between a question's result and the next question (ms)</td></tr>
+                <tr><td><code>LogRetentionDays</code></td><td data-label="Default">14</td><td>How long CloudWatch keeps the logs (1, 3, 5, 7, 14, 30, 60, 90, 180 or 365)</td></tr>
+                <tr><td><code>AlertEmail</code></td><td data-label="Default">empty</td><td>Where alert emails go (step 10)</td></tr>
+                <tr><td><code>AlertTimeZone</code></td><td data-label="Default">UTC</td><td>Time zone for the times in alert emails</td></tr>
+                <tr><td><code>ExtraCorsOrigin</code></td><td data-label="Default">http://localhost:5050</td><td>One more web origin allowed to call the HTTP API, such as the local dev server</td></tr>
+                <tr><td><code>WebSocketStageName</code></td><td data-label="Default">prod</td><td>The last part of the WebSocket address</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note"><code>JwtSecret</code> is a parameter too, but the deploy script always fills it in from <code>aws/.jwt-secret</code>; don't pass it yourself.</p>
+
+          <h3 class="sub-h">Try changes on a second copy first</h3>
+          <p>Every script reads the stack name from <code>QUIBBLE_STACK</code>, so a test copy is just another name. It gets its own tables, bucket and addresses; nothing is shared with the real one.</p>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>$env:QUIBBLE_STACK = "quibble-test"
+npm run deploy
+npm run seed
+# back to the real stack in this terminal:
+Remove-Item Env:QUIBBLE_STACK</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>QUIBBLE_STACK=quibble-test npm run deploy
+QUIBBLE_STACK=quibble-test npm run seed</code></pre>
+            </div>
+          </div>
+
+          <h3 class="sub-h">Before a big game</h3>
+          <ul class="checklist">
+            <li>The Lambda quota is 1,000: <code>npm run quota:lambda</code> (request it days ahead).</li>
+            <li><code>npm run preflight</code> passes, and no deploys are planned while a game is running.</li>
+            <li>The latest version is deployed; with <code>LateGraceMs=5000</code> if the quota is still low.</li>
+            <li>You're sharing the HTTPS <code>WebsiteUrl</code>, or a join link from the lobby.</li>
+            <li>The CloudWatch dashboard is open, so you'd see throttling as it happens.</li>
+          </ul>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>Updates are diffs, and environments are just stacks.</b> Because the whole system is one template, a staging copy costs one environment variable, and a failed update rolls back to the last working version on its own (the monitor emails you when that happens). Where to go next: CloudFront in front of the bucket for a custom domain and real security headers, and Secrets Manager or SSM Parameter Store for the login secret instead of a Lambda environment variable.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= F. TEARDOWN ================= -->
+      <section class="part" id="teardown">
+        <div class="st-head">
+          <p class="eyebrow">Part F</p>
+          <h2>Tear it all down</h2>
+          <p>Done experimenting? Because everything is one stack, removing it is short. This deletes every player account, game and question for good, so export anything you want to keep from the admin console first.</p>
+        </div>
+        <div class="card pad prose">
+          <h3 class="sub-h">1. Empty the website bucket</h3>
+          <p>CloudFormation won't delete a bucket that still has files in it. This looks the bucket's name up in the stack outputs, then removes every file:</p>
+          <div class="pair">
+            <div class="term" data-shell="ps">
+              <div class="term-bar"><span class="term-label">PowerShell</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>$bucket = aws cloudformation describe-stacks --stack-name quibble --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text
+aws s3 rm "s3://$bucket" --recursive</code></pre>
+            </div>
+            <div class="term" data-shell="sh">
+              <div class="term-bar"><span class="term-label">bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+              <pre class="code"><code>bucket=$(aws cloudformation describe-stacks --stack-name quibble --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
+aws s3 rm "s3://$bucket" --recursive</code></pre>
+            </div>
+          </div>
+          <h3 class="sub-h">2. Delete the stack</h3>
+          <p>It asks you to confirm, then removes the functions, both APIs, all nine tables, the bucket, the alarms, the dashboard, the log groups, the SNS topic and the IAM roles. SAM may also offer to remove this stack's uploaded code from the SAM artifact bucket.</p>
+          <div class="term">
+            <div class="term-bar"><span class="term-label">PowerShell or bash</span><button class="btn copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></button></div>
+            <pre class="code"><code>sam delete --stack-name quibble</code></pre>
+          </div>
+          <p>Used <code>QUIBBLE_STACK</code> or another region? Use that stack name in both commands, and add <code>--region</code> with your region code.</p>
+          <h3 class="sub-h">3. Optional clean-up</h3>
+          <ul class="checklist">
+            <li><b>The SAM artifact bucket.</b> <code>--resolve-s3</code> created a separate stack, <code>aws-sam-cli-managed-default</code>, that every SAM project in the region shares. If you have no other SAM projects there, empty its bucket (name starting <code>aws-sam-cli-managed-default</code>) with the S3 console's <b>Empty</b> button, then delete that stack in the CloudFormation console.</li>
+            <li><b>Local files.</b> <code>aws/.jwt-secret</code> and <code>.env</code> (it holds your admin password) can go.</li>
+            <li><b>Access.</b> Deactivate the access key, or delete the IAM user, if you're not going to use AWS again. Keep the budget alarm.</li>
+          </ul>
+          <div class="callout learn">
+            <p class="callout-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>What you're learning</p>
+            <p><b>A stack owns its resources.</b> Deleting it deletes everything it created and nothing else, which is why the bucket has to be emptied by hand (its files were uploaded by a script, not created by CloudFormation) and why the SAM artifact stack survives (it belongs to SAM, not to Quibble). Check the CloudFormation console shows no <code>quibble</code> stack, and look at the Billing console a day later to confirm charges have stopped.</p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <span>Quibble is open source: <a href="https://github.com/Yash19k/quibble" target="_blank" rel="noopener">github.com/Yash19k/quibble</a></span>
+        <span><a href="/how-it-works.html">How it works</a> · <a href="/play.html">Play a game</a></span>
+      </footer>
+    </div>
+  </div>
+</main>
+
+<script src="/js/deploy.js"></script>
+<script src="/config.js"></script>
+<script type="module" src="/js/presence.js"></script>
+</body>
+</html>

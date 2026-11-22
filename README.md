@@ -22,7 +22,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 - **My quizzes:** anyone can build their own quiz with any question type, host it, or share a link so others can host it (they never see the answers)
 - **Leaderboards** (all-time and this week) and a personal match history
 - **Admin console** (`admin.html`, admins only): a live dashboard, a live-games monitor that can end any game, full game history, player accounts (rename, ban with a reason, kick, sign out everywhere, reset password, delete), the question bank (bulk delete, JSON import/export, category rename, Open Trivia DB import), player-quiz moderation, leaderboards, a site-wide announcement banner, rate-limit counters, system health and an audit log of every admin action. See [Admin console](#admin-console)
-- **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP sign-up and failed-login limits (sized for a whole classroom on one Wi-Fi), API Gateway throttling, least-privilege IAM roles
+- **Security:** bcrypt passwords, signed JWTs, input validation on every REST call *and* every socket message, per-IP sign-up and failed-login limits (sized for a whole classroom on one Wi-Fi), a message budget per socket, API Gateway throttling, a strict Content-Security-Policy, least-privilege IAM roles. See [Security](#security)
 - **Observability:** structured logs, custom game metrics, alarms and a CloudWatch dashboard, all created by the template
 - **Email alerts:** uptime probes every minute, plus an email when the site goes down or comes back, when errors are logged, when a deploy fails, and on sensitive admin actions. See [Email alerts](#email-alerts)
 
@@ -136,6 +136,21 @@ QA_API=<HttpApiUrl> QA_WS=<WebSocketUrl> ADMIN_PASSWORD=<admin password> npm run
 - Every DynamoDB partition key stays below ~30% of its limits (1,000 writes/s and 3,000 reads/s) in any burst.
 - Every player sees every phase; a lost update heals itself within seconds.
 
+**How much it holds** (production settings: Lambda quota 1,000, the template's stage throttles)
+
+| | Capacity | What runs out first |
+|---|---|---|
+| Players in one game | **250** (`MaxPlayers`), load-tested with reconnect storms and zero errors | Per game, the busiest DynamoDB keys peak around 25% of their per-key limit. `MaxPlayers` goes up to 1,000, but anything above 250 is untested (the question gate key grows by about 1 write/s per player) |
+| Sign-ups at the same moment | **200+** tested locally; on AWS hundreds per second | `REGISTER_MAX_PER_IP`: **500 per hour per network**. Raise it for a bigger venue where everyone shares one Wi-Fi |
+| Players online at once | **About 5,000 comfortably** (20 full games). The ceiling is around 10,000 | The WebSocket stage throttle (1,000 messages/s, 2,000 burst) when many games open a question at the same moment; API Gateway's account limit of 10,000 requests/s, which includes the pushes (a 250-player game makes about 130/s); on-demand DynamoDB's warm capacity (about 4,000 writes/s) at the first very big event |
+| Games running at once | **About 800** of any size | Each running game keeps one game-timer Lambda busy for its whole duration, out of the 1,000-slot quota. Lobbies don't count |
+| Mass reconnect (a venue's Wi-Fi drops) | Every socket is back within a few seconds for a few thousand players | 500 new WebSocket connections/s per account. The page backs off with jitter (up to 5 s, then 20 s after 5 failed tries) so the crowd spreads out |
+| Accounts and history | Tens of thousands of accounts, about 100,000 game results | Leaderboard refreshes (after every game) and admin pages scan whole tables. Beyond that, keep running totals with DynamoDB Streams |
+
+The per-game numbers come from the local load test. The AWS-wide numbers come from AWS's published limits combined with the per-game load the test measures. To confirm them on AWS, deploy a separate test stack (`QUIBBLE_STACK=quibble-loadtest npm run deploy`) and point the load test at it with `--api`/`--ws`. Never point it at the live stack.
+
+To go past about 10,000 players online: raise the stage throttles in `template.yaml`, ask AWS for higher API Gateway limits, and set DynamoDB warm throughput on the GamePlay and Connections tables before the event.
+
 **Limits that matter**
 
 | Limit | Value | At the limit |
@@ -239,6 +254,20 @@ npm run alerts:test     # sends a test email and says whether the address has co
 
 Every alarm invokes the monitor function (`handlers/monitor.js`), which turns it into a plain-language email and sends it through the `AlertsTopic` SNS topic. If the monitor itself fails, `quibble-monitor-errors` emails CloudWatch's standard message straight through SNS. To add more recipients, subscribe them to the topic (the `AlertsTopicArn` output) in the SNS console. With `AlertEmail` empty, the alarms and probes still run, but nobody is emailed.
 
+## Security
+
+| Threat | What stops it |
+|---|---|
+| Password guessing | bcrypt (cost 10). Each attempt is taken from two budgets **before** the password is checked: 10 failed logins per account and 200 per IP per 15 minutes. The counters are bumped atomically, so a burst of parallel guesses can't get more than the limit through; a successful login hands its slot back. Admins can lift a block on the Security page. |
+| One client flooding the WebSocket | Every message counts against its socket (fixed 10 s windows, kept on the connection record that each message reads anyway). Past 60 messages a window they are refused without doing any work; past 150 the socket is closed. A real player sends a handful per question. This protects the account's shared Lambda concurrency from a single script. |
+| Cheating | The server holds the answer keys, runs the clock (API Gateway's arrival time) and scores everything; nothing in `question:show` reveals the answer. Flag pictures are published under a per-deploy alias derived from the server secret (`lib/images.js`), so the file name (`fr.svg`) no longer gives the answer away. |
+| Tracking players through quiz images | Question images are limited to the site's own flags (`[image:/flags/xx.svg]`), on the server (validation, and stripped from stored quizzes when a game starts) and in the browser; the CSP only allows images from the site itself. |
+| XSS | All dynamic text goes through `textContent`/`setAttribute` (`el()` in `common.js`, which also refuses string `on*` handlers and `javascript:` URLs). Every page has a CSP without inline scripts; `npm run publish` pins `connect-src` to this stack's two API hosts. |
+| Staff impersonation | Self sign-up refuses names like `Admin_2`, `QuibbleSupport` or `mod_team` (an admin can still assign any name). |
+| Malformed input | zod schemas on every body and socket message; game codes must be 6 letters/digits; path ids longer than 200 characters or with control characters are answered 404 before they reach DynamoDB (which would otherwise fail with a 500 and an error alert). |
+| Duplicate writes on flaky networks | Game creation, quiz creation and joins are idempotent: a resend (or a second tab) lands on the same game, quiz or seat. |
+| Stolen admin account | Sensitive admin actions are emailed (see [Email alerts](#email-alerts)); "sign out everywhere" and "reset password" revoke every token issued before them. |
+
 ## Cost
 
 Everything is pay-per-use and nothing runs while idle. Lambda, API Gateway and DynamoDB on-demand all fall within or near the AWS free tier for a hobby project. A 10-question game with 5 players costs a fraction of a cent.
@@ -266,7 +295,10 @@ aws/
 ## Known trade-offs
 
 - Leaderboards are recomputed with one scan of the Results table after each game and stored as a single item that page loads read. That's fine for thousands of games. At larger scale, keep running totals with DynamoDB Streams.
-- The JWT secret is a Lambda environment variable. For production, move it to Secrets Manager or SSM Parameter Store.
+- The JWT secret is a Lambda environment variable. For production, move it to Secrets Manager or SSM Parameter Store (it also names the published flag files, so rotating it needs a redeploy, which republishes them).
+- Logging out forgets the token in the browser; the token itself stays valid until it expires (7 days) unless an admin uses "sign out everywhere". Players have no self-service "sign out everywhere".
+- The site is served from S3, which can't send HTTP security headers: the CSP is a `<meta>` tag, so `frame-ancestors` (clickjacking) can't be set. CloudFront in front of the bucket would add real headers.
+- Typed answers ("type it" questions) from other players are shown on the reveal screen without a profanity filter.
 - The site is served from S3's HTTPS endpoint, which has no index page and an `amazonaws.com` address. Put CloudFront in front of the bucket for a custom domain and `/` URLs.
 
 ## License

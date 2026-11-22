@@ -1440,6 +1440,55 @@ test('admin console: question import / rename / bulk delete, quiz moderation, an
   assert.equal((await api('/api/admin/leaderboard?period=week', { token })).body.period, 'week');
 });
 
+test('abuse: junk ids are 404, parallel password guesses stop at the account limit, a flooding socket is cut off', { timeout: 120_000 }, async (t) => {
+  const token = await adminToken();
+  const u = await register('abuse');
+
+  // Ids that can't name anything never reach DynamoDB (it would reject them: a 500 and an error alert).
+  for (const path of [`/api/quizzes/${'x'.repeat(3000)}`, '/api/quizzes/abc%00def', `/api/admin/users/${'y'.repeat(500)}`]) {
+    assert.equal((await api(path, { token: path.includes('/admin/') ? token : u.token })).status, 404, path.slice(0, 40));
+  }
+
+  // Login attempts are reserved atomically: a burst of parallel guesses can't outrun the per-account limit.
+  const limit = (await api('/api/admin/ratelimits', { token })).body.limits.failedLoginsPerAccount;
+  if (limit <= 50) {
+    const guesses = await Promise.all(Array.from({ length: limit + 20 }, (_, i) =>
+      api('/api/auth/login', { method: 'POST', body: { email: u.email, password: `wrong-${i}-password` } })));
+    const wrong = guesses.filter((r) => r.status === 401).length;
+    assert.ok(wrong <= limit, `${wrong} guesses were checked, the limit is ${limit}`);
+    assert.equal(wrong + guesses.filter((r) => r.status === 429).length, guesses.length, 'every other guess was refused with 429');
+    // The account is locked for the window, even with the right password; an admin can lift it.
+    assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: u.email, password: PASSWORD } })).status, 429);
+    const counter = (await api('/api/admin/ratelimits', { token })).body.counters.find((c) => c.kind === 'login-account' && c.user?.id === u.id);
+    assert.equal((await api(`/api/admin/ratelimits/${encodeURIComponent(counter.key)}`, { method: 'DELETE', token })).status, 200);
+    // Successful logins hand their slot back: many in a row never lock anyone out.
+    for (let i = 0; i < limit + 2; i++) {
+      assert.equal((await api('/api/auth/login', { method: 'POST', body: { email: u.email, password: PASSWORD } })).status, 200);
+    }
+  } else {
+    t.diagnostic(`login burst skipped: the server allows ${limit} failed logins per account (start it with LOGIN_FAIL_MAX_PER_EMAIL=10)`);
+  }
+
+  // A socket flooding messages: refused past the soft limit (no work done), closed past the hard limit.
+  const flood = await Client.connect(u, 'flooder');
+  t.after(() => flood.close());
+  const WINDOW_MS = 10_000; // connections.MSG_WINDOW_MS; 60 messages per window are served, 150 close the socket
+  await sleep(WINDOW_MS - (Date.now() % WINDOW_MS) + 100); // start at the top of a window
+  const acks = [];
+  for (let i = 0; i < 70; i++) acks.push(await flood.send('ping', {}, { timeoutMs: 8000 }));
+  assert.ok(Date.now() % WINDOW_MS < WINDOW_MS - 500, 'the 70 pings fit in one window (a very slow server?)');
+  assert.equal(acks.filter((a) => a.ok).length, 60, 'the first 60 messages of a window are served');
+  assert.equal(acks.filter((a) => a.ok === false && /Too many requests/.test(a.error)).length, 10, 'the rest are refused, unserved');
+  // A burst far past the limit: the socket is closed (acks still in flight are lost with it).
+  await Promise.allSettled(Array.from({ length: 200 }, () => flood.send('ping', {}, { timeoutMs: 5000 })));
+  const closed = await Promise.race([flood.closed, sleep(10_000).then(() => null)]);
+  assert.ok(closed, 'the flooding socket was closed');
+  // The account isn't punished: a new socket works normally.
+  const fresh = await Client.connect(u, 'after-flood');
+  t.after(() => fresh.close());
+  await fresh.hello();
+});
+
 test("the local server's handlers never crashed during these tests", async (t) => {
   if (!statsAtStart) return t.skip('no /__local/stats (not the local dev server)');
   const now = await localStats();

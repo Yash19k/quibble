@@ -16,7 +16,8 @@ import { GameError } from './errors.js';
 import { pickRandom } from './questions.js';
 import { getQuiz } from './quizzes.js';
 import * as Q from './qtypes.js';
-import { getUserById, setCurrentGame, clearCurrentGame, userKey, publicUser } from './users.js';
+import { maskImages } from './images.js';
+import { getUserById, setCurrentGame, clearCurrentGame, userKey, publicUser, lockJoin, unlockJoin } from './users.js';
 import { signToken } from './auth.js';
 import { connectionsForUser, setConnectionGame, clearConnectionGame, deleteConnectionRecord } from './connections.js';
 import { emitToMembers, disconnectUser } from './push.js';
@@ -36,6 +37,7 @@ const UNSTICK_LEASE_MS = 10_000;
 const TOKEN_REFRESH_S = 24 * 60 * 60;
 const COUNT_POLL_MS = 1000; // the question timer pushes "x / y answered" at most this often
 const REPAIR_QUIET_MS = 10_000; // only repair the lobby's player counter after this long without a join
+const JOIN_WAIT_MS = 6000; // a second join of the same player waits this long for the first one's result
 const EARLY_SKEW_MS = 2000; // an answer can't have reached AWS more than this long before its question opened
 // After a question's close is claimed, answers that reached API Gateway BEFORE that instant still count if their Lambda
 // runs within this window (e.g. a player whose socket dropped right after tapping). Then the gate is sealed.
@@ -417,7 +419,8 @@ export async function create(user, data, ctx) {
     }
   }
   const doubles = data.doublePoints ? doubleRounds(picked.length) : new Set();
-  const questions = picked.map((q, i) => Q.prepareQuestion(q, { double: doubles.has(i) }));
+  // Flag pictures under their per-deploy alias (the file name would give the answer away); other images dropped.
+  const questions = picked.map((q, i) => Q.prepareQuestion({ ...q, text: maskImages(q.text) }, { double: doubles.has(i) }));
 
   const rid = requestId || `none-${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
   // Big-screen mode: the host's screen is the projector, so the host never plays from it.
@@ -500,6 +503,47 @@ export async function join(user, { code }, ctx) {
   }
   if (h.status !== 'lobby') throw new GameError('That game has already started.');
 
+  // One join per player at a time: a second tab, or this join resent because it was slow, waits for the first.
+  const token = await lockJoin(user.id, code);
+  if (!token) return joinInFlight(user, code, ctx);
+  return joinLocked(user, code, ctx, h, token);
+}
+
+/** joinSeat under this player's join lock; a join that got a seat released it with its currentGame write. */
+async function joinLocked(user, code, ctx, h, token) {
+  const lock = { released: false };
+  try {
+    return await joinSeat(user, code, ctx, h, lock);
+  } finally {
+    if (!lock.released) await unlockJoin(user.id, token).catch((error) => log('warn', 'releasing a join lock failed', { error, code }));
+  }
+}
+
+/** Another join of this player into this game is running: wait for its member item, then attach this socket too. */
+async function joinInFlight(user, code, ctx) {
+  const until = Date.now() + JOIN_WAIT_MS;
+  while (Date.now() < until) {
+    await sleep(150 + Math.random() * 100);
+    const [m, h] = await Promise.all([gd.getMember(code, user.id), gd.getHeader(code)]);
+    if (m && V.isLive(h)) return rejoin(user, code, m, ctx, h);
+    if (!V.isLive(h)) throw new GameError(h?.status === 'cancelled' ? 'That game was cancelled.' : 'No game with that code.');
+    const fresh = await getUserById(user.id, { consistent: true });
+    if (fresh?.joining !== code) {
+      // That join finished without a seat (full, started, failed). Try once more ourselves.
+      const again = await gd.getMember(code, user.id);
+      if (again) return rejoin(user, code, again, ctx, h);
+      const token = await lockJoin(user.id, code);
+      if (token) return joinLocked(user, code, ctx, h, token);
+    }
+  }
+  throw new GameError('Joining is taking longer than usual. Please try again.');
+}
+
+/** The seat claim and member write of a join (the caller holds the player's join lock). */
+async function joinSeat(user, code, ctx, h, lock) {
+  if (h.status !== 'lobby') throw new GameError('That game has already started.');
+  // (The caller checked for a member item just before taking the lock. Should another join of this player have
+  // finished in between, the member write below fails and this join falls back to rejoining.)
   let claimed;
   try {
     claimed = await claimSeat(code);
@@ -510,7 +554,7 @@ export async function join(user, { code }, ctx) {
     throw err;
   }
   const { seat, count } = claimed;
-  member = {
+  const member = {
     ...gd.keys.member(code, user.id), userId: user.id, username: user.username,
     seat, presenter: false, joinedAt: Date.now(), expiresAt: playTtl(),
   };
@@ -523,7 +567,8 @@ export async function join(user, { code }, ctx) {
     if (existing) return rejoin(user, code, existing, ctx, h);
     throw err;
   }
-  await setCurrentGame(user.id, code);
+  await setCurrentGame(user.id, code, { releaseJoin: true });
+  lock.released = true;
   await attach(user, code, member, ctx, h);
   const after = await gd.getHeader(code);
   if (!V.isLive(after)) {

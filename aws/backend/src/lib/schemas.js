@@ -1,9 +1,19 @@
 // Input validation for REST bodies AND WebSocket messages - sockets are an attack surface too.
 import { z } from 'zod';
+import { imagesAllowed } from './images.js';
+
+// Names that would pass for staff on leaderboards, lobbies and the big screen. Only self sign-up is checked: an admin
+// can still give anyone such a name from the admin console.
+// "Admin_2", "QuibbleBot", "support_team" are refused; "supportive" or "modern" are fine.
+const STAFF_NAME = /admin|moderator|quibble|(^|_)(mod|staff|support|system|official)(_|\d|$)/i;
 
 export const registerSchema = z.object({
   email: z.string().trim().email('must be a valid email').max(120),
-  username: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/, 'must be 3-20 letters, numbers or underscores'),
+  username: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_]{3,20}$/, 'must be 3-20 letters, numbers or underscores')
+    .refine((u) => !STAFF_NAME.test(u), 'is reserved, please pick another name'),
   // bcrypt only uses the first 72 BYTES: longer passwords would silently match anything sharing that prefix.
   password: z
     .string()
@@ -40,6 +50,7 @@ export const questionSchema = z
   })
   .superRefine((q, ctx) => {
     const need = (ok, path, message) => { if (!ok) ctx.addIssue({ code: 'custom', path: [path], message }); };
+    need(imagesAllowed(q.text), 'text', 'images can only be the built-in flags, e.g. [image:/flags/fr.svg]');
     if (q.type === 'choice') {
       need(q.options && q.options.length >= 2, 'options', 'needs 2 to 4 options');
       need(q.correctIndex !== undefined && q.options && q.correctIndex < q.options.length, 'correctIndex', 'must point at one of the options');
@@ -105,7 +116,8 @@ export const triviaImportSchema = z.object({
   difficulty: z.enum(['', 'easy', 'medium', 'hard']).optional().default(''),
 });
 
-const gameCode = z.string().trim().length(6).transform((c) => c.toUpperCase());
+// Codes are 6 letters/digits; anything else (e.g. '#', which separates DynamoDB key parts) is refused up front.
+const gameCode = z.string().trim().transform((c) => c.toUpperCase()).pipe(z.string().regex(/^[A-Z0-9]{6}$/));
 const hello = z.object({ protocol: z.number().int().optional() });
 
 export const wsSchemas = {

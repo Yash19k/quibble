@@ -17,7 +17,7 @@ import { forceCancel, gameStats, kickUser } from '../lib/game.js';
 import { disconnectUser } from '../lib/push.js';
 import * as admin from '../lib/admin.js';
 import { fetchTriviaQuestions, OPENTDB_CATEGORIES } from '../lib/trivia.js';
-import { limitRegister, assertLoginAllowed, recordLoginFailure } from '../lib/ratelimit.js';
+import { limitRegister, reserveLoginAttempt } from '../lib/ratelimit.js';
 import { HttpError } from '../lib/errors.js';
 import {
   parse, registerSchema, loginSchema, questionSchema, quizSchema, userPatchSchema, triviaImportSchema, idListSchema,
@@ -26,6 +26,7 @@ import {
 import { log, metric } from '../lib/log.js';
 
 const MAX_BODY = 50 * 1024;
+const MAX_PARAM = 200; // longest path parameter (id, code, rate-limit key) the routes accept
 const BCRYPT_COST = 10;
 
 // Compared against when the email doesn't exist, so response time doesn't reveal which emails are registered.
@@ -88,14 +89,12 @@ const routes = [
   ['POST', '/api/auth/login', async ({ event, body }) => {
     const { email, password } = parse(loginSchema, body);
     const ip = sourceIp(event);
-    // The limit is checked before the (CPU-heavy) bcrypt compare. Consistent read: the account may be seconds old.
-    const [, user] = await Promise.all([assertLoginAllowed(ip, email), getUserByEmail(email, { consistent: true })]);
+    // The attempt is taken from the IP's and the account's budgets (atomically) before the CPU-heavy bcrypt compare,
+    // so parallel guesses can't outrun the limit. Consistent read: the account may be seconds old.
+    const [release, user] = await Promise.all([reserveLoginAttempt(ip, email), getUserByEmail(email, { consistent: true })]);
     const ok = await bcrypt.compare(password, user ? user.passwordHash : getDummyHash());
-    if (!user || !ok) {
-      // Best effort: failing to count a failure must not turn "wrong password" into a server error.
-      await recordLoginFailure(ip, email).catch((error) => log('warn', 'Could not record a failed login', { error }));
-      throw new HttpError(401, 'Invalid email or password');
-    }
+    if (!user || !ok) throw new HttpError(401, 'Invalid email or password'); // the attempt stays counted
+    await release(); // a successful login never uses up the budget
     if (user.banned) throw new HttpError(403, 'This account has been banned');
     // Only feeds the admin panel's "last login": never worth failing a login over.
     await touchLogin(user.id).catch((error) => log('warn', 'Could not record the login time', { error }));
@@ -120,7 +119,9 @@ const routes = [
 
   ['POST', '/api/quizzes', async ({ event, body }) => {
     const user = await requireAuth(event);
-    return [201, { quiz: quizFull(await createQuiz(user, parse(quizSchema, body))) }];
+    // The page's id for this "new quiz" form: a resent save updates the same quiz instead of making a copy.
+    const requestId = typeof body?.requestId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(body.requestId) ? body.requestId : null;
+    return [201, { quiz: quizFull(await createQuiz(user, parse(quizSchema, body), requestId)) }];
   }],
 
   // The owner gets everything; anyone else only the summary of a shared quiz (enough to host it, never the answers).
@@ -523,6 +524,11 @@ export const handler = async (event) => {
       pathMatched = true;
       if (r.method !== method) continue;
       const params = Object.fromEntries(r.names.map((n, i) => [n, decodeURIComponent(m[i + 1])]));
+      // Ids are UUIDs, game codes 6 characters, rate-limit keys under ~100. A longer or control-character value can't
+      // name anything, and DynamoDB would reject it as a key (a 500 and an error alert): answer 404 right here.
+      if (Object.values(params).some((v) => !v || v.length > MAX_PARAM || /[\u0000-\u001f\u007f]/.test(v))) {
+        return json(404, { error: 'Not found' });
+      }
       const body = ['POST', 'PUT', 'PATCH'].includes(method) ? readBody(event) : {};
       const result = await r.fn({ event, body, params, query: event.queryStringParameters || {} });
       const [status, payload] = Array.isArray(result) ? result : [200, result];

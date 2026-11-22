@@ -57,17 +57,22 @@ export async function emitToMembers(members, event, dataFn) {
   return (await Promise.all(jobs)).filter(Boolean);
 }
 
+/** Force-close one socket. API Gateway then runs $disconnect for it, which cleans up its record and presence. */
+export async function closeSocket(connectionId) {
+  try {
+    const local = localTransport();
+    if (local) await local.close(connectionId);
+    else await api().send(new DeleteConnectionCommand({ ConnectionId: connectionId }));
+  } catch (err) {
+    if (!isGone(err)) log('warn', 'deleteConnection failed', { error: err });
+  }
+}
+
 /** Force-close all of a user's sockets (used when an admin bans them). */
 export async function disconnectUser(userId) {
   const conns = await connectionsForUser(userId);
   await Promise.all(conns.map(async (c) => {
-    try {
-      const local = localTransport();
-      if (local) await local.close(c.connectionId);
-      else await api().send(new DeleteConnectionCommand({ ConnectionId: c.connectionId }));
-    } catch (err) {
-      if (!isGone(err)) log('warn', 'deleteConnection failed', { error: err });
-    }
+    await closeSocket(c.connectionId);
     await deleteConnectionRecord(c.connectionId).catch(() => {});
   }));
 }

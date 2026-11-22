@@ -89,8 +89,15 @@ export async function renderLive(body, args, ctx) {
         ], games, { href: (g) => hrefs.game(g.code), emptyNode: empty('radio', 'No live games right now', 'Lobbies and running games show up here as soon as someone hosts one.') })));
   }
 
+  // One refresh at a time: a slow answer (the API retries for up to a minute) must not stack up requests.
+  let inFlight = false;
+  const refresh = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try { await load(); } finally { inFlight = false; }
+  };
   const timer = setInterval(() => {
-    if (autoRefresh && document.visibilityState === 'visible' && ctx.isCurrent()) load();
+    if (autoRefresh && document.visibilityState === 'visible' && ctx.isCurrent()) refresh();
   }, LIVE_EVERY_MS);
   loading(body);
   await load();
@@ -243,8 +250,11 @@ async function renderGame(body, code, ctx) {
   loading(body);
   await load();
   if (data?.game?.live) {
-    timer = setInterval(() => {
-      if (document.visibilityState === 'visible' && ctx.isCurrent() && data?.game?.live) load();
+    let inFlight = false; // one refresh at a time
+    timer = setInterval(async () => {
+      if (inFlight || document.visibilityState !== 'visible' || !ctx.isCurrent() || !data?.game?.live) return;
+      inFlight = true;
+      try { await load(); } finally { inFlight = false; }
     }, DETAIL_EVERY_MS);
   }
   return () => clearInterval(timer);

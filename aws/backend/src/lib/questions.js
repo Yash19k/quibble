@@ -84,6 +84,9 @@ export function sample(items, count) {
   return pool.slice(0, n);
 }
 
+const TOP_UP_EVERY_MS = 5000;
+let lastTopUp = 0; // when this container last re-read the bank for pickRandom
+
 /**
  * Random sample of `count` questions from the given categories (a name, a list, or empty for all), of the given
  * types (empty or missing for every type).
@@ -94,8 +97,13 @@ export async function pickRandom(categories, count, types) {
   const matching = (list) => list.filter((q) => (!wanted.size || wanted.has(q.category)) && (!kinds.size || kinds.has(typeOf(q))));
   let pool = matching(await listQuestions());
   // Writes only clear the cache of the container that made them: questions an admin just added through the API
-  // aren't in this container's copy yet. Re-read before handing out fewer questions than asked for.
-  if (pool.length < count) pool = matching(await listQuestions({ fresh: true }));
+  // aren't in this container's copy yet. Re-read before handing out fewer questions than asked for, but at most once
+  // every few seconds per container: a category that simply has few questions must not turn every create into a
+  // full table scan.
+  if (pool.length < count && Date.now() - lastTopUp > TOP_UP_EVERY_MS) {
+    lastTopUp = Date.now();
+    pool = matching(await listQuestions({ fresh: true }));
+  }
   return sample(pool, count).map(mapQuestion);
 }
 

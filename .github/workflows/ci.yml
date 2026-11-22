@@ -15,9 +15,10 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm test
+      # LOGIN_FAIL_MAX_PER_EMAIL as on AWS, so the e2e brute-force test runs against the real limit.
       - name: Start local stack (real Lambda handlers + DynamoDB Local)
         run: |
-          REVEAL_MS=600 ADMIN_PASSWORD=admin12345 node aws/local/dev-server.mjs > server.log 2>&1 &
+          REVEAL_MS=600 ADMIN_PASSWORD=admin12345 LOGIN_FAIL_MAX_PER_EMAIL=10 node aws/local/dev-server.mjs > server.log 2>&1 &
           for i in $(seq 1 30); do curl -sf http://localhost:5050/api/health && exit 0; sleep 1; done
           cat server.log; exit 1
       - run: npm run test:e2e

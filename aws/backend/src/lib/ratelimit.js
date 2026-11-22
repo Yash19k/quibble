@@ -2,7 +2,7 @@
 // API Gateway stage throttling protects the APIs as a whole; these limits are per IP / per account, sized (config.js)
 // so a whole classroom behind one Wi-Fi IP can sign up and log in at the same time.
 import crypto from 'node:crypto';
-import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ddb, isConditionFailed } from './db.js';
 import { env } from './config.js';
 import { HttpError } from './errors.js';
@@ -48,31 +48,51 @@ export async function limitRegister(ip) {
   }
 }
 
-async function hitsOf(key) {
-  const res = await ddb.send(new GetCommand({ TableName: env.rateLimitsTable, Key: { key }, ProjectionExpression: 'hits' }));
-  return res.Item?.hits ?? 0;
-}
-
-/** 429 if this IP or this account had too many failed logins in the current 15-minute window. Read-only. */
-export async function assertLoginAllowed(ip, email) {
-  const now = Date.now();
-  const keys = loginFailureKeys(ip, email, now);
-  const [ipHits, emailHits] = await Promise.all([hitsOf(keys.ip), hitsOf(keys.email)]);
-  if (ipHits >= env.loginFailMaxPerIp || emailHits >= env.loginFailMaxPerEmail) {
-    const { retryAfter } = fixedWindow(now, LOGIN_WINDOW_MS);
-    throw new HttpError(429, 'Too many failed attempts, try again in a few minutes.', { retryAfter });
+/** +1 on a counter, only while it is below `max`. False when the counter is already at the limit. */
+async function bumpBelow(key, max, exp) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: env.rateLimitsTable,
+      Key: { key },
+      UpdateExpression: 'ADD hits :one SET expiresAt = :exp',
+      ConditionExpression: 'attribute_not_exists(hits) OR hits < :max',
+      ExpressionAttributeValues: { ':one': 1, ':max': max, ':exp': exp },
+    }));
+    return true;
+  } catch (err) {
+    if (isConditionFailed(err)) return false;
+    throw err;
   }
 }
 
-/** A wrong password or unknown email: count it against both the IP and the account. Successful logins never count. */
-export async function recordLoginFailure(ip, email) {
+const unbump = (key) => ddb.send(new UpdateCommand({
+  TableName: env.rateLimitsTable,
+  Key: { key },
+  UpdateExpression: 'ADD hits :neg',
+  ConditionExpression: 'attribute_exists(hits) AND hits > :zero',
+  ExpressionAttributeValues: { ':neg': -1, ':zero': 0 },
+})).catch(() => {}); // best effort: at worst one success stays counted until the window ends
+
+/**
+ * Take one login attempt from the IP's and the account's budgets BEFORE the password is checked. Each counter is
+ * bumped atomically and only while it is under its limit, so a burst of parallel guesses can never get more than the
+ * limit through (a read-then-write check would let them all pass before the first failure is recorded).
+ * 429 when either budget is spent. Returns a release function: call it after a successful login, so successes never
+ * use up the budget; a failed attempt simply keeps its slot.
+ */
+export async function reserveLoginAttempt(ip, email) {
   const now = Date.now();
+  const w = fixedWindow(now, LOGIN_WINDOW_MS);
   const keys = loginFailureKeys(ip, email, now);
-  const exp = expiresAtFor(fixedWindow(now, LOGIN_WINDOW_MS).endsAt);
-  await Promise.all([keys.ip, keys.email].map((key) => ddb.send(new UpdateCommand({
-    TableName: env.rateLimitsTable,
-    Key: { key },
-    UpdateExpression: 'ADD hits :one SET expiresAt = :exp',
-    ExpressionAttributeValues: { ':one': 1, ':exp': exp },
-  }))));
+  const exp = expiresAtFor(w.endsAt);
+  const tooMany = () => new HttpError(429, 'Too many failed attempts, try again in a few minutes.', { retryAfter: w.retryAfter });
+  if (!(await bumpBelow(keys.email, env.loginFailMaxPerEmail, exp))) throw tooMany();
+  let ipOk = false;
+  try {
+    ipOk = await bumpBelow(keys.ip, env.loginFailMaxPerIp, exp);
+  } finally {
+    if (!ipOk) await unbump(keys.email);
+  }
+  if (!ipOk) throw tooMany();
+  return () => Promise.all([unbump(keys.email), unbump(keys.ip)]);
 }

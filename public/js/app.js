@@ -1165,6 +1165,9 @@ async function editQuiz(body, id) {
 const MAX_QUIZ_QUESTIONS = 30;
 
 function quizBuilder(body, quiz) {
+  // One id per new quiz, sent with every save: a save whose answer got lost (timeout, retried by net.js) and is sent
+  // again updates the same quiz instead of creating a second copy.
+  const requestId = quiz?.id ? null : randomId();
   const title = el('input', { id: 'quiz-title', maxlength: 60, value: quiz?.title || '', placeholder: 'e.g. Friday office trivia' });
   const desc = el('input', { id: 'quiz-desc', maxlength: 200, value: quiz?.description || '', placeholder: 'Optional' });
   const shared = el('input', { type: 'checkbox', checked: !!quiz?.shared });
@@ -1232,7 +1235,9 @@ function quizBuilder(body, quiz) {
     }
     const payload = { title: title.value.trim(), description: desc.value.trim(), shared: shared.checked, questions };
     try {
-      await api(quiz?.id ? `/api/quizzes/${quiz.id}` : '/api/quizzes', { method: quiz?.id ? 'PUT' : 'POST', body: payload });
+      await api(quiz?.id ? `/api/quizzes/${quiz.id}` : '/api/quizzes', {
+        method: quiz?.id ? 'PUT' : 'POST', body: quiz?.id ? payload : { ...payload, requestId },
+      });
       toast('Quiz saved');
       quizzesTab(body);
     } catch (err) {
@@ -1280,7 +1285,7 @@ async function leaderboardTab(body, period = 'all') {
             el('tbody', {}, leaderboard.map((r) => el('tr', { class: r.userId === me?.id ? 'me-row' : '' },
               rankCell(r.rank),
               el('td', {}, r.username),
-              el('td', { class: 'num' }, r.totalScore.toLocaleString()),
+              el('td', { class: 'num' }, fmt(r.totalScore)),
               el('td', { class: 'num' }, r.gamesPlayed),
               el('td', { class: 'num' }, r.wins)))))
         : el('p', { class: 'muted' }, 'No finished games yet. Be the first on the board!')));
@@ -1298,7 +1303,7 @@ async function historyTab(body) {
   if (!body.isConnected) return;
   clear(body).append(
     el('div', { class: 'stats' },
-      el('div', { class: 'stat' }, el('b', {}, totals.totalScore.toLocaleString()), 'total points'),
+      el('div', { class: 'stat' }, el('b', {}, fmt(totals.totalScore)), 'total points'),
       el('div', { class: 'stat' }, el('b', {}, totals.gamesPlayed), 'games played'),
       el('div', { class: 'stat' }, el('b', {}, totals.wins), 'wins')),
     el('div', { class: 'card table-wrap' },
@@ -1310,7 +1315,7 @@ async function historyTab(body) {
               el('td', {}, g.category || 'All'),
               el('td', { class: 'num' }, `${g.rank} of ${g.playerCount}`),
               el('td', { class: 'num' }, `${g.correctCount}/${g.questionCount}`),
-              el('td', { class: 'num' }, g.score.toLocaleString())))))
+              el('td', { class: 'num' }, fmt(g.score))))))
         : el('p', { class: 'muted' }, "You haven't finished a game yet.")));
 }
 
@@ -1614,19 +1619,24 @@ function startCountdown(endsAt, totalMs, bar, label, onDone) {
   tick = setInterval(update, 100);
 }
 
-/** Only same-site paths ("/flags/fr.svg") or https: images; anything else (javascript:, data:, //host) is dropped. */
+/**
+ * Only the site's own flag pictures ("/flags/<name>.svg", same rule as the server's lib/images.js). Anything else,
+ * including other hosts ("https://...", "//host", "/\host"), javascript: and data:, is dropped: a quiz author must
+ * never be able to make players' browsers call a server of their choosing.
+ */
 function safeImageUrl(raw) {
   const src = String(raw || '').trim();
-  if (/^\/(?!\/)/.test(src)) return src;
+  if (!/^\/flags\/[A-Za-z0-9_-]{1,40}\.svg$/.test(src)) return null;
   try {
-    const url = new URL(src);
-    return url.protocol === 'https:' ? url.href : null;
+    const url = new URL(src, location.href);
+    return url.origin === location.origin ? url.href : null;
   } catch {
     return null;
   }
 }
 
 function renderQuestionContent(rawText) {
+  rawText = typeof rawText === 'string' ? rawText : '';
   const match = rawText.match(/\[image:([^\]]+)\]/);
   const src = match ? safeImageUrl(match[1]) : null;
   if (!match) return el('div', { class: 'qtext', tabindex: '-1' }, rawText);
@@ -1707,7 +1717,7 @@ function orderInput(q) {
   const picked = [];
   let disabled = false;
   const n = q.options.length;
-  const items = q.options.map((text, i) => el('button', { type: 'button', class: 'order-item', onclick: () => toggle(i) },
+  const items = (q.options || []).map((text, i) => el('button', { type: 'button', class: 'order-item', onclick: () => toggle(i) },
     el('span', { class: 'order-slot', 'aria-hidden': 'true' }), el('span', {}, text)));
   const submit = el('button', { type: 'button', class: 'block', onclick: () => {
     if (picked.length === n) submitAnswer({ order: [...picked] }, picked.map((i) => q.options[i]).join(' → '));
@@ -1746,7 +1756,7 @@ function presenterBox(q) {
   if (q.type === 'order') {
     return el('div', {},
       el('p', { class: 'reveal-label' }, 'Put these in order'),
-      el('ul', { class: 'order-show' }, q.options.map((t) => el('li', {}, t))));
+      el('ul', { class: 'order-show' }, (q.options || []).map((t) => el('li', {}, t))));
   }
   return el('div', { class: 'type-wait' },
     icon(q.type === 'number' ? 'number' : 'type', { size: 28 }),
@@ -1766,7 +1776,7 @@ function renderQuestion() {
   const timeLabel = el('span', { class: 'timer', 'aria-hidden': 'true' });
   const status = el('div', { class: 'banner info', role: 'status', hidden: true });
   const count = el('span', { class: 'muted' });
-  const options = tap ? q.options.map((text, i) => optionButton(q, text, i, { shaped })) : [];
+  const options = tap ? (q.options || []).map((text, i) => optionButton(q, text, i, { shaped })) : [];
   let input = null;
   if (!tap && playing) input = type === 'type' ? typedInput(q) : type === 'number' ? numberInput(q) : orderInput(q);
   questionUi = { key, type, tap, playing, options, input, status, count, timeUp: false };

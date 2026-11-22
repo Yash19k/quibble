@@ -16,14 +16,14 @@
 //   - after a reconnect: messages are kept across socket drops
 // A message fails after 30 s with "The server did not respond. Try again.".
 //
-// Connection. Reconnects with full-jitter backoff (capped at 5 s). Coming back online, showing the tab again or
-// restoring the page resets the backoff; if the socket still looks open we ping it and replace it when nothing at
+// Connection. Reconnects with full-jitter backoff (capped at 5 s; 20 s after 5 failures in a row). Coming back online,
+// showing the tab again or restoring the page resets the backoff; if the socket still looks open we ping it and replace it when nothing at
 // all comes back within 3 s (a half-open socket after a network switch). The same happens when a message waits
 // through two ack timeouts while the socket stays completely silent.
 //
 // opts (all optional): WebSocket (implementation), ackTimeoutMs, ackTimeoutCapMs, giveUpMs, errorResendMinMs,
-// errorResendMaxMs, reconnectBaseMs, reconnectCapMs, connectTimeoutMs, probeTimeoutMs, deadSocketMs, keepaliveMs,
-// log(message, detail) for debugging.
+// errorResendMaxMs, errorResendCapMs, reconnectBaseMs, reconnectCapMs, reconnectLongAfter, reconnectLongCapMs,
+// connectTimeoutMs, probeTimeoutMs, deadSocketMs, keepaliveMs, log(message, detail) for debugging.
 
 export const NO_RESPONSE = 'The server did not respond. Try again.';
 export const CLOSED = 'Connection closed.';
@@ -34,8 +34,13 @@ const DEFAULTS = {
   giveUpMs: 30_000,
   errorResendMinMs: 200,
   errorResendMaxMs: 800,
+  errorResendCapMs: 5000, // resends after API Gateway error frames back off per message up to this
   reconnectBaseMs: 1000,
   reconnectCapMs: 5000,
+  // After this many failed reconnects in a row (an outage, or $connect throttled), wait up to reconnectLongCapMs
+  // instead: a whole crowd retrying every few seconds would keep a throttle going (500 new sockets/s per account).
+  reconnectLongAfter: 5,
+  reconnectLongCapMs: 20_000,
   connectTimeoutMs: 10_000, // a handshake that hangs this long (dead network) is abandoned
   probeTimeoutMs: 3000,
   deadSocketMs: 7000, // silence this long while a message waits for its ack -> the socket is presumed dead
@@ -215,7 +220,8 @@ export class Realtime {
   _scheduleReconnect(delayMs) {
     if (this.stopped) return;
     clearTimeout(this.timers.reconnect);
-    const { reconnectBaseMs: base, reconnectCapMs: cap } = this.opts;
+    const { reconnectBaseMs: base, reconnectCapMs, reconnectLongAfter, reconnectLongCapMs } = this.opts;
+    const cap = this.attempt >= reconnectLongAfter ? reconnectLongCapMs : reconnectCapMs;
     const wait = delayMs ?? Math.random() * Math.min(cap, base * 2 ** this.attempt); // full jitter
     this.attempt += 1;
     this.timers.reconnect = setTimeout(() => this.connect(), wait);
@@ -275,6 +281,7 @@ export class Realtime {
   _transmit(entry) {
     clearTimeout(entry.ackTimer);
     entry.ackTimer = null;
+    entry.errorResend = false;
     if (!this._isOpen()) return; // goes out when the socket (re)opens
     try { this.ws.send(entry.frame); } catch { return; } // closing: resent after the reconnect
     entry.sentAt = Date.now();
@@ -301,17 +308,31 @@ export class Realtime {
     this._transmit(entry);
   }
 
+  /**
+   * API Gateway's own error frame (e.g. the Lambda was throttled). It doesn't say which message failed, so every
+   * message sent before it is resent, each after its own growing, jittered pause: with a fixed short pause, a room of
+   * players resending twice a second would keep the throttle going.
+   */
   _onErrorFrame(frame) {
     const seenAt = Date.now();
-    const { errorResendMinMs: lo, errorResendMaxMs: hi } = this.opts;
     this.log('error frame', frame);
-    setTimeout(() => {
-      if (this.stopped || !this._isOpen()) return; // a reconnect resends everything anyway
-      for (const entry of this.pending.values()) {
-        // Sent before the frame arrived and not resent since (by another frame's pass or its ack timer).
-        if (entry.sends > 0 && entry.sentAt <= seenAt) this._transmit(entry);
-      }
-    }, lo + Math.random() * (hi - lo));
+    for (const entry of this.pending.values()) {
+      // Sent before the frame arrived and not already waiting for an error resend.
+      if (entry.sends === 0 || entry.sentAt > seenAt || entry.errorResend) continue;
+      entry.errorResend = true;
+      clearTimeout(entry.ackTimer);
+      entry.ackTimer = setTimeout(() => {
+        entry.ackTimer = null;
+        // Closed meanwhile: the reconnect resends everything anyway.
+        if (this.stopped || this.pending.get(entry.id) !== entry || !this._isOpen()) return;
+        this._transmit(entry);
+      }, this._errorDelay(entry.sends));
+    }
+  }
+
+  _errorDelay(sends) {
+    const { errorResendMinMs: lo, errorResendMaxMs: hi, errorResendCapMs: cap } = this.opts;
+    return Math.min(cap, (lo + Math.random() * (hi - lo)) * 2 ** Math.max(0, sends - 1));
   }
 
   _onFrame(raw) {

@@ -90,8 +90,15 @@ export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === false || v == null) continue;
-    if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
-    else if (k === 'class') node.className = v;
+    if (k.startsWith('on')) {
+      if (typeof v === 'function') node.addEventListener(k.slice(2), v);
+      continue; // never an inline handler from a string (the CSP would block it anyway)
+    }
+    // URL attributes never take a script URL, whatever a future caller passes in.
+    // (Browsers ignore tabs, newlines and leading control characters in a URL's scheme, so those are removed first.)
+    if (['href', 'src', 'action', 'formaction'].includes(k)
+      && /^(javascript:|vbscript:|data:text\/html)/i.test(String(v).replace(/[\u0000- ]/g, ''))) continue;
+    if (k === 'class') node.className = v;
     else if (k === 'value') node.value = v;
     else if (k === 'checked' || k === 'disabled' || k === 'selected') node[k] = !!v;
     else node.setAttribute(k, v === true ? '' : v);

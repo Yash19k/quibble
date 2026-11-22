@@ -212,14 +212,54 @@ export async function deleteUserRecords(user) {
 }
 
 /** Remember which game a user is in (so a refresh / reconnect puts them back). */
-export async function setCurrentGame(userId, code) {
+export async function setCurrentGame(userId, code, { releaseJoin = false } = {}) {
   await ddb.send(new UpdateCommand({
     TableName: env.usersTable,
     Key: userKey(userId),
-    UpdateExpression: 'SET currentGame = :c',
+    // A finished join also drops its join lock (lockJoin) in the same write.
+    UpdateExpression: `SET currentGame = :c${releaseJoin ? ' REMOVE joining, joiningAt, joinToken' : ''}`,
     ConditionExpression: 'attribute_exists(pk)',
     ExpressionAttributeValues: { ':c': code },
   }));
+}
+
+/**
+ * One join per player per game at a time. Two tabs joining at once, or a slow join resent by the page, would each take
+ * a lobby seat (one is handed back moments later), which can turn the last real players away from a nearly full room.
+ * The lock lives on the player's own item, so a crowd joining never shares a key. Returns a token for unlockJoin, or
+ * null when another join of this player into this game started less than `staleMs` ago.
+ */
+export async function lockJoin(userId, code, { staleMs = 15_000 } = {}) {
+  const now = Date.now();
+  const token = `${code}:${now}:${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: env.usersTable,
+      Key: userKey(userId),
+      UpdateExpression: 'SET joining = :code, joiningAt = :now, joinToken = :tok',
+      ConditionExpression: 'attribute_exists(pk) AND (attribute_not_exists(joinToken) OR joining <> :code OR joiningAt < :stale)',
+      ExpressionAttributeValues: { ':code': code, ':now': now, ':tok': token, ':stale': now - staleMs },
+    }));
+    return token;
+  } catch (err) {
+    if (isConditionFailed(err)) return null;
+    throw err;
+  }
+}
+
+/** Release a join lock (only the one this token took). */
+export async function unlockJoin(userId, token) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: env.usersTable,
+      Key: userKey(userId),
+      UpdateExpression: 'REMOVE joining, joiningAt, joinToken',
+      ConditionExpression: 'joinToken = :tok',
+      ExpressionAttributeValues: { ':tok': token },
+    }));
+  } catch (err) {
+    if (!isConditionFailed(err)) throw err;
+  }
 }
 
 /** Clear currentGame, but only if it still points at this game. */

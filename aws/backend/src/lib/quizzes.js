@@ -48,17 +48,38 @@ export async function listQuizzes(ownerId) {
   return items;
 }
 
-export async function createQuiz(user, data) {
+/** A UUID-shaped id derived from the owner and the page's request id, so a resent create lands on the same quiz. */
+export function quizIdFor(ownerId, requestId) {
+  const h = crypto.createHash('sha256').update(`quiz:${ownerId}:${requestId}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+/**
+ * `requestId` (optional, one per "new quiz" form) makes the create idempotent: a save that is sent again because
+ * its answer got lost overwrites the quiz the first one made instead of adding a duplicate.
+ */
+export async function createQuiz(user, data, requestId = null) {
+  const id = requestId ? quizIdFor(user.id, requestId) : crypto.randomUUID();
+  const existing = requestId ? await getQuiz(id) : null;
+  if (existing && existing.ownerId !== user.id) throw new HttpError(409, 'Please reload the page and try again.');
   // The index is eventually consistent, so a burst of creates could slip one or two past the cap: harmless.
-  if ((await listQuizzes(user.id)).length >= MAX_QUIZZES_PER_USER) {
+  if (!existing && (await listQuizzes(user.id)).length >= MAX_QUIZZES_PER_USER) {
     throw new HttpError(400, `You can keep up to ${MAX_QUIZZES_PER_USER} quizzes. Delete one to make room.`);
   }
   const now = nowIso();
   const item = {
-    id: crypto.randomUUID(), ownerId: user.id, ownerName: user.username, ...data,
-    questionCount: data.questions.length, createdAt: now, updatedAt: now,
+    id, ownerId: user.id, ownerName: user.username, ...data,
+    questionCount: data.questions.length, createdAt: existing?.createdAt ?? now, updatedAt: now,
   };
-  await ddb.send(new PutCommand({ TableName: env.quizzesTable, Item: item, ConditionExpression: 'attribute_not_exists(id)' }));
+  try {
+    await ddb.send(new PutCommand({
+      TableName: env.quizzesTable, Item: item,
+      ConditionExpression: 'attribute_not_exists(id) OR ownerId = :o', ExpressionAttributeValues: { ':o': user.id },
+    }));
+  } catch (err) {
+    if (isConditionFailed(err)) throw new HttpError(409, 'Please reload the page and try again.');
+    throw err;
+  }
   return item;
 }
 

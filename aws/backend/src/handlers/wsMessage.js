@@ -3,9 +3,9 @@
 //   server  -> { type: 'ack', id, ok: true, ... }   (reply to that message)
 //   server  -> { type: 'event', event: 'question:show', data }   (pushes, see lib/game.js)
 // Browsers resend unacknowledged messages, so every action is idempotent.
-import { getConnection } from '../lib/connections.js';
+import { touchConnection } from '../lib/connections.js';
 import { getUserById, tokenRevoked } from '../lib/users.js';
-import { sendTo, disconnectUser } from '../lib/push.js';
+import { sendTo, disconnectUser, closeSocket } from '../lib/push.js';
 import { GameError } from '../lib/errors.js';
 import { wsSchemas, parse } from '../lib/schemas.js';
 import * as game from '../lib/game.js';
@@ -23,6 +23,12 @@ const actions = {
   'answer:submit': game.submitAnswer,
   react: game.react,
 };
+
+// Messages per socket per 10 s window (connections.MSG_WINDOW_MS). A real page sends a handful per question (answer,
+// reactions at most every 600 ms, resends); past the soft limit messages are refused without doing any work, past
+// the hard limit the socket is closed.
+const MSG_SOFT_LIMIT = 60;
+const MSG_HARD_LIMIT = 150;
 
 // Infrastructure hiccups (throttling, timeouts) are worth a resend; the browser does that when it sees `retry`.
 const isTransient = (err) =>
@@ -50,9 +56,21 @@ export const handler = async (event) => {
 
   const deferred = [];
   try {
-    // Strongly consistent: the socket and the user may have been created milliseconds ago. Re-read the user on
-    // every message so bans apply instantly.
-    const conn = await getConnection(connectionId);
+    // Strongly consistent: the socket and the user may have been created milliseconds ago. Counting the message
+    // against this socket's budget is part of the same (single) read of its record.
+    const conn = await touchConnection(connectionId);
+    const hits = Number(conn?.rlHits) || 0;
+    if (hits > MSG_HARD_LIMIT) {
+      // Far beyond any real player (a script): drop this socket. A real page would reconnect and resync.
+      if (hits === MSG_HARD_LIMIT + 1) log('warn', 'closing a flooding socket', { connectionId, userId: conn.userId, hits });
+      await closeSocket(connectionId);
+      return { statusCode: 200 };
+    }
+    if (hits > MSG_SOFT_LIMIT) {
+      await ack({ ok: false, error: 'Too many requests. Slow down a little.' });
+      return { statusCode: 200 };
+    }
+    // Re-read the user on every message so bans apply instantly.
     const user = conn && (await getUserById(conn.userId, { consistent: true }));
     if (!user || user.banned) {
       await ack({ ok: false, error: 'unauthorized' });

@@ -40,10 +40,37 @@ const publicDir = path.join(stack.ROOT_DIR, 'public');
 
 const config = `window.QUIBBLE_CONFIG = ${JSON.stringify({ apiUrl: out.HttpApiUrl, wsUrl: out.WebSocketUrl }, null, 2)};\n`;
 const uploads = [{ key: 'config.js', body: config, type: TYPES['.js'] }];
+
+// Flags go up under their per-deploy alias only (lib/images.js): "flags/fr.svg" would give the answer away. The alias
+// comes from the same secret the API signs with, so the names match what the API puts in question texts.
+const secretFile = path.join(stack.AWS_DIR, '.jwt-secret');
+const secret = process.env.JWT_SECRET || (fs.existsSync(secretFile) ? fs.readFileSync(secretFile, 'utf8').trim() : '');
+if (secret.length < 32) {
+  console.error('No JWT secret (aws/.jwt-secret or JWT_SECRET): it is needed to name the flag images. Run "npm run deploy".');
+  process.exit(1);
+}
+const { imageAlias, aliasedSvg } = await import('../backend/src/lib/images.js');
+
+// The pages may only talk to this stack's two APIs (the HTML ships with a wildcard for any *.amazonaws.com host).
+const origin = (u) => { try { return new URL(u).host; } catch { return null; } };
+const apiHost = origin(out.HttpApiUrl);
+const wsHost = origin(out.WebSocketUrl);
+const pinCsp = (html) => (apiHost && wsHost
+  ? html.replace('https://*.amazonaws.com wss://*.amazonaws.com', `https://${apiHost} wss://${wsHost}`)
+  : html);
+
 for (const file of walk(publicDir)) {
   const key = path.relative(publicDir, file).split(path.sep).join('/');
   if (key === 'config.js') continue;
-  uploads.push({ key, body: fs.readFileSync(file), type: TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream' });
+  const type = TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  const flag = /^flags\/([a-z0-9-]+)\.svg$/i.exec(key);
+  if (flag) {
+    const body = aliasedSvg(fs.readFileSync(file, 'utf8'), flag[1], secret);
+    uploads.push({ key: `flags/${imageAlias(flag[1], secret)}.svg`, body, type });
+    continue;
+  }
+  const body = key.endsWith('.html') ? pinCsp(fs.readFileSync(file, 'utf8')) : fs.readFileSync(file);
+  uploads.push({ key, body, type });
 }
 
 for (const u of uploads) {

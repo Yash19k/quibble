@@ -259,6 +259,7 @@ handlers = {
   timer: (await imp('handlers/gameTimer.js')).handler,
 };
 const { capacityReport } = await imp('lib/db.js');
+const images = await imp('lib/images.js');
 
 // ---------- seed (idempotent) ----------
 {
@@ -355,6 +356,18 @@ function handleLocal(res, url) {
   return sendJson(res, 404, { error: 'Not found' });
 }
 
+let aliasMap = null; // alias -> { file, name } for public/flags/<name>.svg
+function flagAliases() {
+  if (aliasMap) return aliasMap;
+  aliasMap = new Map();
+  const dir = path.join(publicDir, 'flags');
+  for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+    const m = /^([a-z0-9-]+)\.svg$/i.exec(f);
+    if (m) aliasMap.set(images.imageAlias(m[1]), { file: path.join(dir, f), name: m[1] });
+  }
+  return aliasMap;
+}
+
 function serveStatic(res, url) {
   let rel;
   try {
@@ -364,6 +377,13 @@ function serveStatic(res, url) {
     return res.end();
   }
   if (rel === '/') rel = '/index.html'; // like the S3 website's index document
+  // Games show flags under their per-deploy alias (lib/images.js), like the files the publish step uploads.
+  const alias = /^\/flags\/([A-Za-z0-9_-]+)\.svg$/.exec(rel);
+  if (alias && flagAliases().has(alias[1])) {
+    const { file, name } = flagAliases().get(alias[1]);
+    res.writeHead(200, { 'content-type': TYPES['.svg'], 'cache-control': 'no-cache' });
+    return res.end(images.aliasedSvg(fs.readFileSync(file, 'utf8'), name));
+  }
   const file = path.normalize(path.join(publicDir, rel));
   if (!file.startsWith(publicDir + path.sep)) {
     res.writeHead(403);

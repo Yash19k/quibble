@@ -108,7 +108,9 @@ function renderShell() {
 }
 
 function route() {
-  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  // A malformed %-escape in a hand-edited or pasted link must not leave the console blank.
+  const decode = (p) => { try { return decodeURIComponent(p); } catch { return p; } };
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decode);
   const page = byId.get(parts[0]) ?? byId.get('overview');
   for (const [id, a] of links) {
     const on = id === page.id;
@@ -125,8 +127,16 @@ function route() {
   window.scrollTo({ top: 0 });
   // A page may render asynchronously; `isCurrent` lets it stop when the admin has moved on.
   const pageCtx = { ...ctx, isCurrent: () => seq === renderSeq };
-  Promise.resolve(page.render(body, parts.slice(1), pageCtx)).then((fn) => {
-    if (seq === renderSeq) cleanup = fn;
-    else if (typeof fn === 'function') fn();
-  });
+  Promise.resolve()
+    .then(() => page.render(body, parts.slice(1), pageCtx))
+    .then((fn) => {
+      if (seq === renderSeq) cleanup = fn;
+      else if (typeof fn === 'function') fn();
+    })
+    .catch((err) => {
+      console.error(`Admin page "${page.id}" failed`, err);
+      if (seq === renderSeq && body.isConnected) {
+        clear(body).append(el('p', { class: 'muted' }, 'This page could not be shown. Reload to try again.'));
+      }
+    });
 }

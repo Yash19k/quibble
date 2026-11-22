@@ -7,6 +7,7 @@ import {
 import { icon, shape } from './icons.js';
 import { Realtime } from './realtime.js';
 import { drawQr } from './qr.js';
+import { setPresence } from './presence.js';
 import { questionEditor, TYPE_LABELS, TYPE_ICONS } from './qeditor.js';
 
 // Game protocol spoken with the server. The server answers hello with {reload: true} when it moved on.
@@ -160,6 +161,7 @@ function updateMe(user) {
 
 function route(force = false) {
   const key = screenKey();
+  setPresence({ page: room && me ? 'game' : 'play', game: room && me ? room.code : null });
   if (!force && key === screen) return patchScreen();
   screen = key;
   clearInterval(tick);

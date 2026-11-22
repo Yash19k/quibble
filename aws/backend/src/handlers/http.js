@@ -16,6 +16,7 @@ import { leaderboard, history, aggregate, allResults, refreshBoards } from '../l
 import { forceCancel, gameStats, kickUser } from '../lib/game.js';
 import { disconnectUser } from '../lib/push.js';
 import * as admin from '../lib/admin.js';
+import * as analytics from '../lib/analytics.js';
 import { fetchTriviaQuestions, OPENTDB_CATEGORIES } from '../lib/trivia.js';
 import { limitRegister, reserveLoginAttempt } from '../lib/ratelimit.js';
 import { HttpError } from '../lib/errors.js';
@@ -155,6 +156,18 @@ const routes = [
   // The banner admins post (maintenance, events). Public: the play page shows it before anyone logs in.
   ['GET', '/api/announcement', async () => ({ announcement: await admin.getAnnouncement() })],
 
+  // Heartbeat from every page (public/js/presence.js): feeds "online now" and the Analytics page. Guests are anonymous;
+  // a valid token names the account. A bad or expired token is not an error here, the visit just counts as a guest.
+  ['POST', '/api/presence', async ({ event, body }) => {
+    const beat = analytics.parseBeat(body);
+    const header = event.headers?.authorization || '';
+    await analytics.recordBeat(beat, {
+      token: header.startsWith('Bearer ') ? header.slice(7) : null,
+      userAgent: event.headers?.['user-agent'] || event.requestContext?.http?.userAgent || '',
+    });
+    return { ok: true };
+  }],
+
   // ---------- admin ----------
   // Every admin route checks the role first. Actions that change something are written to the audit log
   // (admin.audit), which the panel's Activity page lists. Question reads skip the per-container cache: the panel
@@ -168,6 +181,32 @@ const routes = [
   }],
 
   // ----- games -----
+  // ----- analytics -----
+  // Who is on the site right now (polled every few seconds by the Analytics page), plus live games.
+  ['GET', '/api/admin/analytics/live', async ({ event }) => {
+    await requireAdmin(event);
+    const [now, games] = await Promise.all([analytics.live(), admin.listGames()]);
+    const liveGames = games.filter((g) => g.live);
+    return {
+      ...now,
+      games: {
+        live: liveGames.length,
+        playing: liveGames.filter((g) => g.state !== 'lobby').length,
+        lobbies: liveGames.filter((g) => g.state === 'lobby').length,
+        players: liveGames.reduce((s, g) => s + (g.playerCount || 0), 0),
+        list: liveGames.slice(0, 12),
+      },
+    };
+  }],
+
+  ['GET', '/api/admin/analytics', async ({ event, query }) => {
+    await requireAdmin(event);
+    const range = Object.hasOwn(analytics.RANGES, query.range) ? query.range : '7d';
+    const tz = Math.min(Math.max(parseInt(query.tz, 10) || 0, -840), 840);
+    const [results, users] = await Promise.all([allResults(), listUsers()]);
+    return analytics.report({ range, tz, results, users });
+  }],
+
   ['GET', '/api/admin/games', async ({ event }) => {
     await requireAdmin(event);
     return { games: (await admin.listGames()).slice(0, 2000) };

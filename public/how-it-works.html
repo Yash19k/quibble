@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- Same origin as the game, whose login token lives in localStorage: only this site's own scripts may run here.
        The <script type="text/plain"> blocks below are code samples shown on the page; they never run. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Quibble · How it works</title>
   <meta name="description" content="A hands-on tour of how Quibble runs a 250-player real-time quiz on serverless AWS: follow a request, try the scoring, break things on purpose and play an AWS round.">
@@ -17,7 +17,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@500;700&display=swap">
   <link rel="stylesheet" href="/css/how.css">
 </head>
-<body>
+<body data-page="how">
 <header class="top">
   <a class="brand" href="/index.html">Quib<span>ble</span><small>How it works</small></a>
   <nav>
@@ -734,5 +734,7 @@ await update(gate, { update: 'ADD #answered :one, #seats :seatSet',
 </script>
 
 <script src="/js/how.js"></script>
+<script src="/config.js"></script>
+<script type="module" src="/js/presence.js"></script>
 </body>
 </html>

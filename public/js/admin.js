@@ -3,6 +3,7 @@
 import { api, el, clear, setToken, setProfile } from './common.js';
 import { aicon } from './admin/icons.js';
 import * as overview from './admin/overview.js';
+import * as analytics from './admin/analytics.js';
 import * as games from './admin/games.js';
 import * as users from './admin/users.js';
 import * as questions from './admin/questions.js';
@@ -15,6 +16,7 @@ import * as system from './admin/system.js';
 
 const PAGES = [
   { id: 'overview', group: 'Monitor', label: 'Overview', icon: 'dashboard', render: overview.render },
+  { id: 'analytics', group: 'Monitor', label: 'Analytics', icon: 'analytics', render: analytics.render },
   { id: 'live', group: 'Monitor', label: 'Live games', icon: 'radio', render: games.renderLive },
   { id: 'games', group: 'Monitor', label: 'Game history', icon: 'history', render: games.render },
   { id: 'users', group: 'Manage', label: 'Players', icon: 'users', render: users.render },

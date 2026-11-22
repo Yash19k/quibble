@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Same origin as the game, whose login token lives in localStorage: only this site's own scripts may run here.
+       The <script type="text/plain"> blocks below are code samples shown on the page; they never run. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Quibble · How it works</title>
+  <meta name="description" content="A hands-on tour of how Quibble runs a 250-player real-time quiz on serverless AWS: follow a request, try the scoring, break things on purpose and play an AWS round.">
+  <meta name="theme-color" content="#ff5420">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <script src="/js/theme.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@500;700&display=swap">
+  <link rel="stylesheet" href="/css/how.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/index.html">Quib<span>ble</span><small>How it works</small></a>
+  <nav>
+    <a class="nav-link wide-only" href="#run">Run it yourself</a>
+    <a class="nav-link" href="https://github.com/Yash19k/quibble" rel="noopener">GitHub</a>
+    <a class="btn primary small" href="/play.html">Play now</a>
+  </nav>
+</header>
+
+<main class="wrap" id="start">
+  <section class="hero">
+    <p class="eyebrow">A hands-on tour for students new to AWS</p>
+    <h1>How Quibble runs a 250-player quiz with <span class="mark">no server</span></h1>
+    <p class="lead">Quibble is a real-time multiplayer quiz built only from serverless AWS pieces. One person hosts, everyone joins from their phone, and the whole room races the same countdown. Press the buttons below to watch a request travel through it, break things on purpose, then play a round yourself.</p>
+    <div class="facts" aria-label="Quibble in numbers">
+      <span class="fact">6 Lambda functions</span>
+      <span class="fact">9 DynamoDB tables</span>
+      <span class="fact">2 API Gateway APIs</span>
+      <span class="fact">1 template file</span>
+      <span class="fact">0 servers to manage</span>
+    </div>
+    <ol class="stations">
+      <li><a href="#follow"><i>Station 1</i><b>Follow a request</b><span>Watch sign-up, joining and answering travel through AWS</span></a></li>
+      <li><a href="#scoring"><i>Station 2</i><b>Scoring</b><span>Drag the slider and see why speed matters</span></a></li>
+      <li><a href="#retries"><i>Station 3</i><b>Retries</b><span>Send an answer twice, count it once</span></a></li>
+      <li><a href="#burst"><i>Station 4</i><b>250 at once</b><span>Why the tables are split the way they are</span></a></li>
+      <li><a href="#quiz"><i>Station 5</i><b>Play a round</b><span>8 questions, 20 seconds each</span></a></li>
+    </ol>
+  </section>
+
+  <!-- ================= STATION 1 ================= -->
+  <section class="station" id="follow">
+    <div class="st-head">
+      <p class="eyebrow">Station 1</p>
+      <h2>Follow a request</h2>
+      <p>Pick something a player does. The orange dot is the request: step through it hop by hop and read the real code each piece runs. Click any box to see what it is and how the template creates it.</p>
+    </div>
+    <div class="chips" id="scenarios" role="group" aria-label="Choose what the player does"></div>
+    <div class="explorer">
+      <div class="card dg-card">
+        <div class="dg-scroll">
+          <svg class="dg" id="dg" viewBox="0 0 1000 640" role="group" aria-label="Quibble's architecture. Each box is a button that explains that piece.">
+            <g>
+              <rect class="group-box" x="480" y="150" width="230" height="360" rx="10"/>
+              <text class="g-label" x="495" y="173">AWS LAMBDA</text>
+              <text class="g-label" x="20" y="546">WATCHING IT</text>
+            </g>
+            <g id="edges">
+              <path id="e-browser-s3" class="edge" d="M170 250 C 210 250, 210 76, 250 76"/>
+              <path id="e-browser-http" class="edge" d="M170 280 C 210 280, 210 236, 250 236"/>
+              <path id="e-browser-ws" class="edge" d="M170 330 C 210 330, 210 376, 250 376"/>
+              <path id="e-http-api" class="edge" d="M430 236 C 462 236, 462 212, 495 212"/>
+              <path id="e-ws-connect" class="edge" d="M430 366 C 462 366, 462 278, 495 278"/>
+              <path id="e-ws-disconnect" class="edge" d="M430 376 C 462 376, 462 330, 495 330"/>
+              <path id="e-ws-message" class="edge" d="M430 386 C 462 386, 462 382, 495 382"/>
+              <path id="e-message-timer" class="edge" d="M595 404 V440"/>
+              <path id="e-timer-ws" class="edge" d="M495 470 C 420 470, 340 470, 340 412"/>
+              <path id="e-api-ddb" class="edge" d="M695 212 C 735 212, 735 223, 770 223"/>
+              <path id="e-connect-ddb" class="edge" d="M695 278 C 735 278, 735 340, 770 340"/>
+              <path id="e-disconnect-ddb" class="edge" d="M695 330 C 735 330, 735 348, 770 348"/>
+              <path id="e-message-ddb" class="edge" d="M695 382 C 735 382, 735 308, 770 308"/>
+              <path id="e-timer-ddb" class="edge" d="M695 464 C 740 464, 740 318, 770 318"/>
+              <path id="e-lambda-cw" class="edge static" d="M560 510 C 560 535, 340 530, 340 556"/>
+              <path id="e-eb-monitor" class="edge" d="M95 612 V630 H595 V612"/>
+              <path id="e-cw-monitor" class="edge" d="M430 584 H495"/>
+              <path id="e-monitor-sns" class="edge" d="M695 584 H770"/>
+            </g>
+            <g id="nodes">
+              <g class="node" id="n-browser" data-node="browser" tabindex="0" role="button" aria-label="Player's browser: what it is">
+                <rect class="sh" x="24" y="224" width="150" height="150" rx="6"/>
+                <rect class="box" x="20" y="220" width="150" height="150" rx="6"/>
+                <rect class="icon" x="80" y="240" width="30" height="48" rx="5"/><path class="icon" d="M91 281 h8"/>
+                <text class="n-t" x="95" y="320" text-anchor="middle">Browser</text>
+                <text class="n-s" x="95" y="342" text-anchor="middle">phone or laptop</text>
+              </g>
+              <g class="node" id="n-s3" data-node="s3" tabindex="0" role="button" aria-label="Amazon S3: what it is">
+                <rect class="sh" x="254" y="44" width="180" height="72" rx="6"/>
+                <rect class="box" x="250" y="40" width="180" height="72" rx="6"/>
+                <text class="n-t" x="340" y="71" text-anchor="middle">Amazon S3</text>
+                <text class="n-s" x="340" y="93" text-anchor="middle">website files</text>
+              </g>
+              <g class="node" id="n-http" data-node="http" tabindex="0" role="button" aria-label="HTTP API: what it is">
+                <rect class="sh" x="254" y="204" width="180" height="72" rx="6"/>
+                <rect class="box" x="250" y="200" width="180" height="72" rx="6"/>
+                <text class="n-t" x="340" y="231" text-anchor="middle">HTTP API</text>
+                <text class="n-s" x="340" y="253" text-anchor="middle">API Gateway</text>
+              </g>
+              <g class="node" id="n-ws" data-node="ws" tabindex="0" role="button" aria-label="WebSocket API: what it is">
+                <rect class="sh" x="254" y="344" width="180" height="72" rx="6"/>
+                <rect class="box" x="250" y="340" width="180" height="72" rx="6"/>
+                <text class="n-t" x="340" y="371" text-anchor="middle">WebSocket API</text>
+                <text class="n-s" x="340" y="393" text-anchor="middle">API Gateway</text>
+              </g>
+              <g class="node" id="n-api" data-node="api" tabindex="0" role="button" aria-label="api function: what it is">
+                <rect class="sh" x="499" y="192" width="200" height="48" rx="6"/>
+                <rect class="box" x="495" y="188" width="200" height="48" rx="6"/>
+                <text class="n-t" x="595" y="218" text-anchor="middle">λ api</text>
+              </g>
+              <g class="node" id="n-connect" data-node="connect" tabindex="0" role="button" aria-label="ws-connect function: what it is">
+                <rect class="sh" x="499" y="260" width="200" height="44" rx="6"/>
+                <rect class="box" x="495" y="256" width="200" height="44" rx="6"/>
+                <text class="n-t" x="595" y="284" text-anchor="middle">λ ws-connect</text>
+              </g>
+              <g class="node" id="n-disconnect" data-node="disconnect" tabindex="0" role="button" aria-label="ws-disconnect function: what it is">
+                <rect class="sh" x="499" y="312" width="200" height="44" rx="6"/>
+                <rect class="box" x="495" y="308" width="200" height="44" rx="6"/>
+                <text class="n-t" x="595" y="336" text-anchor="middle">λ ws-disconnect</text>
+              </g>
+              <g class="node" id="n-message" data-node="message" tabindex="0" role="button" aria-label="ws-message function: what it is">
+                <rect class="sh" x="499" y="364" width="200" height="44" rx="6"/>
+                <rect class="box" x="495" y="360" width="200" height="44" rx="6"/>
+                <text class="n-t" x="595" y="388" text-anchor="middle">λ ws-message</text>
+              </g>
+              <g class="node" id="n-timer" data-node="timer" tabindex="0" role="button" aria-label="game-timer function: what it is">
+                <rect class="sh" x="499" y="444" width="200" height="48" rx="6"/>
+                <rect class="box" x="495" y="440" width="200" height="48" rx="6"/>
+                <text class="n-t" x="595" y="470" text-anchor="middle">λ game-timer</text>
+              </g>
+              <g class="node" id="n-ddb" data-node="ddb" tabindex="0" role="button" aria-label="DynamoDB: what it is">
+                <rect class="sh" x="774" y="154" width="210" height="360" rx="6"/>
+                <rect class="box" x="770" y="150" width="210" height="360" rx="6"/>
+                <text class="n-t" x="785" y="178">DynamoDB</text>
+                <text class="n-s" x="785" y="198">9 tables · on-demand</text>
+                <g class="tbl" id="t-Users"><rect x="780" y="211" width="190" height="24" rx="4"/><text x="792" y="228">Users</text></g>
+                <g class="tbl" id="t-Questions"><rect x="780" y="241" width="190" height="24" rx="4"/><text x="792" y="258">Questions</text></g>
+                <g class="tbl" id="t-Games"><rect x="780" y="271" width="190" height="24" rx="4"/><text x="792" y="288">Games</text></g>
+                <g class="tbl" id="t-GamePlay"><rect x="780" y="301" width="190" height="24" rx="4"/><text x="792" y="318">GamePlay</text></g>
+                <g class="tbl" id="t-Connections"><rect x="780" y="331" width="190" height="24" rx="4"/><text x="792" y="348">Connections</text></g>
+                <g class="tbl" id="t-Results"><rect x="780" y="361" width="190" height="24" rx="4"/><text x="792" y="378">Results</text></g>
+                <g class="tbl" id="t-Quizzes"><rect x="780" y="391" width="190" height="24" rx="4"/><text x="792" y="408">Quizzes</text></g>
+                <g class="tbl" id="t-RateLimits"><rect x="780" y="421" width="190" height="24" rx="4"/><text x="792" y="438">RateLimits</text></g>
+                <g class="tbl" id="t-Admin"><rect x="780" y="451" width="190" height="24" rx="4"/><text x="792" y="468">Admin</text></g>
+              </g>
+              <g class="node" id="n-eb" data-node="eb" tabindex="0" role="button" aria-label="EventBridge: what it is">
+                <rect class="sh" x="24" y="560" width="150" height="56" rx="6"/>
+                <rect class="box" x="20" y="556" width="150" height="56" rx="6"/>
+                <text class="n-t" x="95" y="580" text-anchor="middle">EventBridge</text>
+                <text class="n-s" x="95" y="599" text-anchor="middle">every minute</text>
+              </g>
+              <g class="node" id="n-cw" data-node="cw" tabindex="0" role="button" aria-label="CloudWatch: what it is">
+                <rect class="sh" x="254" y="560" width="180" height="56" rx="6"/>
+                <rect class="box" x="250" y="556" width="180" height="56" rx="6"/>
+                <text class="n-t" x="340" y="580" text-anchor="middle">CloudWatch</text>
+                <text class="n-s" x="340" y="599" text-anchor="middle">logs · alarms</text>
+              </g>
+              <g class="node" id="n-monitor" data-node="monitor" tabindex="0" role="button" aria-label="monitor function: what it is">
+                <rect class="sh" x="499" y="560" width="200" height="56" rx="6"/>
+                <rect class="box" x="495" y="556" width="200" height="56" rx="6"/>
+                <text class="n-t" x="595" y="580" text-anchor="middle">λ monitor</text>
+                <text class="n-s" x="595" y="599" text-anchor="middle">probes + emails</text>
+              </g>
+              <g class="node" id="n-sns" data-node="sns" tabindex="0" role="button" aria-label="SNS: what it is">
+                <rect class="sh" x="774" y="560" width="210" height="56" rx="6"/>
+                <rect class="box" x="770" y="556" width="210" height="56" rx="6"/>
+                <text class="n-t" x="875" y="580" text-anchor="middle">Amazon SNS</text>
+                <text class="n-s" x="875" y="599" text-anchor="middle">emails you</text>
+              </g>
+            </g>
+            <g id="pkt" class="gone" transform="translate(0 0)"><circle r="8"/><text id="pkt-t" x="13" y="-12"></text></g>
+          </svg>
+        </div>
+        <p class="dg-hint">The dashed line is logging: every function writes its logs to CloudWatch.</p>
+      </div>
+
+      <div class="card panel" id="panel" aria-live="polite">
+        <p class="kicker" id="p-kicker">Sign up · step 1 of 5</p>
+        <h3 id="p-title">Loading…</h3>
+        <p class="body" id="p-body"></p>
+        <p class="src" id="p-src"></p>
+        <pre class="code" id="p-pre"><code id="p-code"></code></pre>
+        <div class="ctrl" id="ctrl-step">
+          <button class="btn" id="prev" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>Back</button>
+          <div class="dots" id="dots"></div>
+          <button class="btn" id="replay" type="button" title="Replay this step"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Replay</button>
+          <button class="btn primary" id="next" type="button">Next<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg></button>
+        </div>
+        <div class="ctrl" id="ctrl-info" hidden>
+          <button class="btn primary" id="back-walk" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>Back to the walkthrough</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= STATION 2 ================= -->
+  <section class="station" id="scoring">
+    <div class="st-head">
+      <p class="eyebrow">Station 2</p>
+      <h2>How points are scored</h2>
+      <p>The browser only ever says "I picked option 2". The server knows the answer, runs the clock and scores it with two small functions from <code>lib/scoring.js</code>. Move the sliders to see what they give.</p>
+    </div>
+    <div class="card pad score-grid">
+      <div style="display:grid; gap:20px; align-content:start; min-width:0">
+        <div class="field">
+          <label for="sc-time">Answered after <output id="sc-time-out" for="sc-time">4.0 s</output></label>
+          <input type="range" id="sc-time" min="0" max="20" step="0.1" value="4">
+          <span class="note">The question's timer is 20 seconds.</span>
+        </div>
+        <div class="field">
+          <span class="lbl">The answer was</span>
+          <div class="seg" role="group" aria-label="Was the answer right?">
+            <button type="button" id="sc-right" aria-pressed="true">Right</button>
+            <button type="button" id="sc-wrong" aria-pressed="false">Wrong</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="sc-streak">Right answers in a row, counting this one <output id="sc-streak-out" for="sc-streak">1</output></label>
+          <input type="range" id="sc-streak" min="1" max="8" step="1" value="1">
+        </div>
+        <div class="total">
+          <span class="kicker">Points for this answer</span>
+          <span class="big" id="sc-total">920</span>
+          <span class="split" id="sc-split">920 speed + 0 streak bonus</span>
+        </div>
+      </div>
+      <div style="display:grid; gap:14px; align-content:start; min-width:0">
+        <div class="chart" id="sc-chart" aria-label="Points against answer time"></div>
+        <pre class="code"><code id="sc-code"></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= STATION 3 ================= -->
+  <section class="station" id="retries">
+    <div class="st-head">
+      <p class="eyebrow">Station 3</p>
+      <h2>Send it twice, count it once</h2>
+      <p>Phones lose signal, acknowledgements go missing and Lambda retries failed calls, so any message can arrive twice. Run the same flaky answer through a plain write and through Quibble's conditional write.</p>
+    </div>
+    <div class="card pad" style="display:grid; gap:20px">
+      <div class="retry-bar">
+        <button class="btn primary" id="rt-run" type="button"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>Answer over a flaky network</button>
+        <button class="btn" id="rt-reset" type="button">Reset</button>
+        <span class="note">Question 3 is open, 12 of 30 players have answered, and Ada taps option B at 3.2 s.</span>
+      </div>
+      <div class="retry-grid">
+        <div class="lane">
+          <h3>Plain write</h3>
+          <p class="tagline">Save whatever arrives. Count every save.</p>
+          <ul class="log" id="rt-plain"></ul>
+          <div class="verdict" id="rt-plain-v"></div>
+          <pre class="code"><code id="rt-plain-code"></code></pre>
+        </div>
+        <div class="lane">
+          <h3>Conditional write (Quibble)</h3>
+          <p class="tagline">Save only if this seat hasn't answered. Count each seat once.</p>
+          <ul class="log" id="rt-cond"></ul>
+          <div class="verdict" id="rt-cond-v"></div>
+          <pre class="code"><code id="rt-cond-code"></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= STATION 4 ================= -->
+  <section class="station" id="burst">
+    <div class="st-head">
+      <p class="eyebrow">Station 4</p>
+      <h2>250 answers in the same second</h2>
+      <p>DynamoDB handles about 1,000 writes a second on one partition key. Put a whole game under one key and a big room overloads it. Pick a design, drag the slider, and send every answer at once.</p>
+    </div>
+    <div class="card pad">
+      <div class="burst-ctrl">
+        <div class="field">
+          <label for="bs-n">Players in the game <output id="bs-n-out" for="bs-n">250</output></label>
+          <input type="range" id="bs-n" min="10" max="1000" step="10" value="250">
+        </div>
+        <div class="field">
+          <span class="lbl">Table design</span>
+          <div class="seg" role="group" aria-label="Table design">
+            <button type="button" id="bs-single" aria-pressed="false">One key per game</button>
+            <button type="button" id="bs-split" aria-pressed="true">Quibble's split keys</button>
+          </div>
+        </div>
+        <button class="btn primary" id="bs-go" type="button"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>Everyone answers now</button>
+      </div>
+      <div class="canvas-wrap"><canvas id="bs-canvas" aria-label="Players' answers flying into DynamoDB partition keys"></canvas></div>
+      <div class="meters" id="bs-meters"></div>
+      <p class="note" style="margin-top:14px">Simplified model: each player makes two writes in the burst, the answer and the count on the question's gate. The dashed line is the 1,000 writes a second limit; red is what DynamoDB would throttle. The real load test keeps every key under 30% of its limit.</p>
+    </div>
+  </section>
+
+  <!-- ================= STATION 5 ================= -->
+  <section class="station" id="quiz">
+    <div class="st-head">
+      <p class="eyebrow">Station 5</p>
+      <h2>Play the AWS round</h2>
+      <p>Eight questions on what you just saw, scored exactly like Quibble: up to 1,000 points for a fast right answer, 500 at the buzzer, and a streak bonus from the third right answer in a row.</p>
+    </div>
+    <div class="card quiz" id="qz">
+      <div class="qz-top"><span id="qz-progress">Ready</span><span class="pts" id="qz-score">0 pts</span></div>
+      <div class="timebar" aria-hidden="true"><i id="qz-bar"></i></div>
+      <div class="qz-body" id="qz-stage"></div>
+    </div>
+  </section>
+
+  <!-- ================= RUN IT ================= -->
+  <section class="station" id="run">
+    <div class="st-head">
+      <p class="eyebrow">Your turn</p>
+      <h2>Run it yourself</h2>
+      <p>Start on your laptop: the local dev server runs the real Lambda code against DynamoDB Local, so you need no AWS account. When you're ready, the same repo deploys to your own account with three commands.</p>
+    </div>
+    <div class="run-grid">
+      <div class="card pad run-card">
+        <h3>1. Play locally</h3>
+        <p>Needs Node.js 22 and Docker Desktop. Opens on localhost:5050.</p>
+        <div class="cmd"><pre class="code"><code id="cmd-local">git clone https://github.com/Yash19k/quibble.git
+cd quibble
+npm install
+docker run -d -p 8000:8000 --name quibble-dynamodb amazon/dynamodb-local
+npm run dev</code></pre><button class="btn" type="button" data-copy="cmd-local">Copy</button></div>
+      </div>
+      <div class="card pad run-card">
+        <h3>2. Deploy to AWS</h3>
+        <p>Needs the AWS CLI logged in and the SAM CLI. Prints your HTTPS link at the end.</p>
+        <div class="cmd"><pre class="code"><code id="cmd-deploy">npm run preflight
+npm run deploy
+npm run seed</code></pre><button class="btn" type="button" data-copy="cmd-deploy">Copy</button></div>
+      </div>
+      <div class="card pad run-card">
+        <h3>3. Clean up</h3>
+        <p>Empty the website bucket, then delete the whole stack. Nothing is left to bill you.</p>
+        <div class="cmd"><pre class="code"><code id="cmd-clean">aws s3 rm s3://&lt;FrontendBucketName&gt; --recursive
+sam delete --stack-name quibble</code></pre><button class="btn" type="button" data-copy="cmd-clean">Copy</button></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span>Quibble is open source: <a href="https://github.com/Yash19k/quibble" target="_blank" rel="noopener">github.com/Yash19k/quibble</a></span>
+    <span>Seen enough? <a href="/play.html">Play a real game</a></span>
+  </footer>
+</main>
+
+<!-- ================= code snippets (shown in the panels) ================= -->
+<script type="text/plain" id="c-policy">
+# aws/template.yaml: anyone may READ the files, nobody may write
+FrontendBucketPolicy:
+  Type: AWS::S3::BucketPolicy
+  Properties:
+    Bucket: !Ref FrontendBucket
+    PolicyDocument:
+      Statement:
+        - Sid: PublicReadForWebsite
+          Effect: Allow
+          Principal: '*'
+          Action: s3:GetObject
+          Resource: !Sub '${FrontendBucket.Arn}/*'
+</script>
+<script type="text/plain" id="c-config">
+// config.js, written by aws/scripts/publish-frontend.mjs from the stack's outputs
+window.QUIBBLE_CONFIG = {
+  apiUrl: 'https://<api-id>.execute-api.ap-south-1.amazonaws.com',
+  wsUrl: 'wss://<ws-id>.execute-api.ap-south-1.amazonaws.com/prod',
+};
+</script>
+<script type="text/plain" id="c-register">
+POST /api/auth/register
+Content-Type: application/json
+
+{ "email": "ada@example.com", "username": "ada_l", "password": "********" }
+</script>
+<script type="text/plain" id="c-schema">
+// lib/schemas.js: every REST body AND every socket message is checked first
+export const registerSchema = z.object({
+  email: z.string().trim().email().max(120),
+  username: z.string().trim().regex(/^[A-Za-z0-9_]{3,20}$/),
+  password: z.string().min(8).max(72),   // bcrypt only reads 72 bytes
+});
+
+const { email, username, password } = parse(registerSchema, body);
+</script>
+<script type="text/plain" id="c-ratelimit">
+// lib/ratelimit.js: one counter per network per hour
+await ddb.send(new UpdateCommand({
+  TableName: env.rateLimitsTable,
+  Key: { key: `reg#${ip}#${hourIndex}` },
+  UpdateExpression: 'ADD hits :one SET expiresAt = :exp',
+  ConditionExpression: 'attribute_not_exists(hits) OR hits < :max',
+  ExpressionAttributeValues: { ':one': 1, ':max': 500, ':exp': ttl },
+}));
+// condition fails -> 429 "Too many sign-ups from this network"
+</script>
+<script type="text/plain" id="c-guards">
+// lib/users.js: three writes, all or nothing
+await ddb.send(new TransactWriteCommand({ TransactItems: [
+  { Put: { TableName, Item: { pk: `EMAIL#${email}`, userId: id },
+           ConditionExpression: 'attribute_not_exists(pk)' } },
+  { Put: { TableName, Item: { pk: `UNAME#${username}`, userId: id },
+           ConditionExpression: 'attribute_not_exists(pk)' } },
+  { Put: { TableName, Item: { pk: `USER#${id}`, email, username, passwordHash },
+           ConditionExpression: 'attribute_not_exists(pk)' } },
+]}));
+// email taken -> the whole transaction fails -> 409, nothing saved
+</script>
+<script type="text/plain" id="c-token">
+// lib/auth.js
+export const signToken = (userId, sessionVersion = 0) =>
+  jwt.sign({ sub: userId, sv: sessionVersion }, env.jwtSecret,
+           { expiresIn: '7d', algorithm: 'HS256' });
+
+// handlers/http.js: the reply
+return [201, { user: publicUser(user), token: signToken(user.id) }];
+</script>
+<script type="text/plain" id="c-wsopen">
+// js/realtime.js (simplified): the token rides in the URL,
+// because the site and the API are on different domains
+const socket = new WebSocket(`${QUIBBLE_CONFIG.wsUrl}?token=${getToken()}`);
+</script>
+<script type="text/plain" id="c-connect">
+// handlers/wsConnect.js (simplified)
+export const handler = async (event) => {
+  const claims = verifyToken(event.queryStringParameters?.token);
+  const user = claims && (await getUserById(claims.userId, { consistent: true }));
+  if (!user || user.banned) return { statusCode: 401 };   // socket refused
+  await saveConnection(event.requestContext.connectionId, user.id);
+  return { statusCode: 200 };
+};
+</script>
+<script type="text/plain" id="c-joinmsg">
+// browser -> server, on the $default route
+{ "id": 7, "event": "room:join", "data": { "code": "QB7K2M" } }
+</script>
+<script type="text/plain" id="c-seat">
+// lib/game.js: take the next seat at the lobby gate
+await update(gamePlayTable, { pk: `${code}#L`, sk: 'L' }, {
+  update: 'ADD #seq :one, #count :one SET #lastClaimAt = :now',
+  condition: 'attribute_exists(#sk) AND #open = :t AND #count < #max',
+});
+// two players can never get the same seat, and #max (250) is never passed
+</script>
+<script type="text/plain" id="c-push">
+// lib/push.js: Lambda doesn't hold the socket, API Gateway does
+const api = new ApiGatewayManagementApiClient({ endpoint: env.wsEndpoint });
+
+export async function sendTo(connectionId, message) {
+  try {
+    await api.send(new PostToConnectionCommand({
+      ConnectionId: connectionId, Data: JSON.stringify(message),
+    }));
+    return 'ok';
+  } catch (err) {
+    if (err.name === 'GoneException') return 'gone';   // that socket closed
+    return 'failed';
+  }
+}
+</script>
+<script type="text/plain" id="c-answermsg">
+// browser -> server: only the choice, never the answer
+{ "id": 12, "event": "answer:submit", "data": { "code": "QB7K2M", "index": 2, "choice": 1 } }
+</script>
+<script type="text/plain" id="c-arrival">
+// handlers/wsMessage.js
+const ctx = {
+  connectionId,
+  // when API Gateway received this frame: deadlines and speed points use it,
+  // so a cold start or a throttled-and-resent message never costs the player
+  now: Number(event.requestContext.requestTimeEpoch) || Date.now(),
+};
+</script>
+<script type="text/plain" id="c-answerput">
+// lib/game.js: 1. write the answer, only the first time
+await ddb.send(new PutCommand({
+  TableName: env.gamePlayTable,
+  Item: { pk: `${code}#A#${k}`, sk: String(seat), choice, at },
+  ConditionExpression: 'attribute_not_exists(sk)',
+}));
+// a resend fails the condition: the first arrival time is kept
+</script>
+<script type="text/plain" id="c-gate">
+// lib/game.js: 2. count it at the question's gate (condition shortened)
+const gate = await update(gamePlayTable, { pk: `${code}#Q`, sk: String(k) }, {
+  update: 'ADD #answered :one, #seats :seatSet',
+  condition: 'attribute_not_exists(#sealed) AND #acceptUntil >= :at AND NOT contains(#seats, :seat)',
+});
+if (gate.answered >= gate.expected) closeEarly(code, k);   // everyone answered
+</script>
+<script type="text/plain" id="c-ack">
+// server -> browser: the reply to message 12
+{ "type": "ack", "id": 12, "ok": true, "locked": true, "index": 2 }
+</script>
+<script type="text/plain" id="c-invoke">
+// lib/timer.js: no setTimeout in Lambda, so hand the deadline to another Lambda
+await lambda.send(new InvokeCommand({
+  FunctionName: env.timerFunction,
+  InvocationType: 'Event',   // fire-and-forget; Lambda queues it and retries
+  Payload: JSON.stringify({ kind: 'question', code, qIndex, dueAt }),
+}));
+</script>
+<script type="text/plain" id="c-count">
+// game-timer -> every player, about once a second
+{ "type": "event", "event": "answer:count",
+  "data": { "code": "QB7K2M", "index": 2, "answered": 12, "total": 30 } }
+</script>
+<script type="text/plain" id="c-version">
+// lib/game.js (simplified): a phase change only lands if nobody beat us to it
+TransactItems: [{ Update: {
+  TableName: env.gamesTable, Key: { code },
+  UpdateExpression: 'SET #status = :reveal, #version = :v1',
+  ConditionExpression: '#version = :v0 AND #status = :question',   // :v0 = 7, :v1 = 8
+}}, /* ...plus the scores and the question's result... */ ]
+// ConditionalCheckFailed -> another timer already closed it: do nothing
+</script>
+<script type="text/plain" id="c-recursive">
+# aws/template.yaml
+GameTimerFunction:
+  Type: AWS::Serverless::Function
+  Properties:
+    FunctionName: !Sub '${AWS::StackName}-game-timer'
+    Handler: src/handlers/gameTimer.handler
+    Timeout: 120
+    RecursiveLoop: Allow          # each timer schedules the next one
+    EventInvokeConfig:
+      MaximumRetryAttempts: 2     # every step is safe to run twice
+</script>
+<script type="text/plain" id="c-schedule">
+# aws/template.yaml: MonitorFunction's triggers
+Events:
+  HealthCheck:
+    Type: Schedule
+    Properties:
+      Schedule: rate(1 minute)
+  DeployFailed:
+    Type: EventBridgeRule
+    Properties:
+      Pattern:
+        source: [aws.cloudformation]
+        detail-type: [CloudFormation Stack Status Change]
+</script>
+<script type="text/plain" id="c-probe">
+// handlers/monitor.js
+async function healthCheck() {
+  const results = await runHealthChecks({
+    siteUrl: `${process.env.SITE_URL}/index.html`,   // S3
+    apiUrl: process.env.HTTP_API_URL,                 // GET /api/health reads DynamoDB
+    wsUrl: process.env.WS_URL,                        // a healthy $connect answers 401
+  });
+  const failures = results.filter((r) => !r.ok);
+  metric('HealthCheckFailed', failures.length ? 1 : 0);
+}
+</script>
+<script type="text/plain" id="c-emf">
+// lib/log.js: a log line in this shape becomes a CloudWatch metric
+export function metric(name, value = 1, unit = 'Count') {
+  console.log(JSON.stringify({
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [{ Namespace: 'Quibble', Dimensions: [[]],
+                            Metrics: [{ Name: name, Unit: unit }] }],
+    },
+    [name]: value,
+  }));
+}
+</script>
+<script type="text/plain" id="c-alarm">
+# aws/template.yaml
+HealthCheckAlarm:
+  Type: AWS::CloudWatch::Alarm
+  Properties:
+    AlarmName: !Sub '${AWS::StackName}-health-check'
+    Namespace: Quibble
+    MetricName: HealthCheckFailed
+    Period: 60
+    EvaluationPeriods: 3
+    DatapointsToAlarm: 2          # 2 bad minutes out of 3
+    Threshold: 1
+    ComparisonOperator: GreaterThanOrEqualToThreshold
+    AlarmActions: [!GetAtt MonitorFunction.Arn]   # "it's down" email
+    OKActions: [!GetAtt MonitorFunction.Arn]      # "it's back" email
+</script>
+<script type="text/plain" id="c-sns">
+# aws/template.yaml
+AlertsTopic:
+  Type: AWS::SNS::Topic
+  Properties:
+    DisplayName: Quibble alerts
+
+AlertsEmailSubscription:
+  Type: AWS::SNS::Subscription
+  Condition: HasAlertEmail
+  Properties:
+    TopicArn: !Ref AlertsTopic
+    Protocol: email
+    Endpoint: !Ref AlertEmail     # npm run deploy -- AlertEmail=you@example.com
+</script>
+<script type="text/plain" id="c-client">
+// js/realtime.js: how the page survives a bad network
+//   - every message waits for its ack and is resent with the SAME id
+//   - no ack after 2.5 s: resend, doubling the wait up to 8 s
+//   - socket dropped: reconnect with backoff, then send `sync`
+//     to get a full snapshot of the game
+const reply = await rt.send('answer:submit', { code, index, choice });
+if (reply.ok) showLocked();
+</script>
+<script type="text/plain" id="c-httpapi">
+# aws/template.yaml
+HttpApi:
+  Type: AWS::Serverless::HttpApi
+  Properties:
+    CorsConfiguration:
+      AllowOrigins:
+        - !Sub 'https://${FrontendBucket.RegionalDomainName}'
+      AllowHeaders: [content-type, authorization]
+      AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+    DefaultRouteSettings:          # throttled before any Lambda runs
+      ThrottlingBurstLimit: 2000
+      ThrottlingRateLimit: 1000
+</script>
+<script type="text/plain" id="c-wsapi">
+# aws/template.yaml (one of the three routes shown)
+WebSocketApi:
+  Type: AWS::ApiGatewayV2::Api
+  Properties:
+    ProtocolType: WEBSOCKET
+    RouteSelectionExpression: '$request.body.action'
+
+ConnectRoute:
+  Type: AWS::ApiGatewayV2::Route
+  Properties:
+    ApiId: !Ref WebSocketApi
+    RouteKey: $connect           # also $default and $disconnect
+    AuthorizationType: NONE      # the Lambda checks the JWT itself
+    Target: !Sub 'integrations/${ConnectIntegration}'
+</script>
+<script type="text/plain" id="c-routes">
+// handlers/http.js: one function, a table of routes
+const routes = [
+  ['GET',  '/api/health',        async () => { await admin.pingDatabase(); return { ok: true }; }],
+  ['POST', '/api/auth/register', async ({ event, body }) => { /* validate, limit, hash, save */ }],
+  ['POST', '/api/auth/login',    async ({ event, body }) => { /* compare, sign a token */ }],
+  ['GET',  '/api/leaderboard',   async ({ query }) => { /* read the stored board */ }],
+  // ... about 45 routes, most of them for the admin console
+];
+</script>
+<script type="text/plain" id="c-disconnect">
+// handlers/wsDisconnect.js: the whole file
+export const handler = async (event) => {
+  try {
+    await disconnect(event.requestContext.connectionId);
+  } catch (err) {
+    log('error', 'disconnect failed', { error: err });
+  }
+  return { statusCode: 200 };
+};
+</script>
+<script type="text/plain" id="c-actions">
+// handlers/wsMessage.js: every game action the browser can send
+const actions = {
+  hello: game.hello,
+  sync: game.hello,              // "where are we now?" after a reconnect
+  'game:create': game.create,
+  'room:join': game.join,
+  'game:start': game.start,
+  'answer:submit': game.submitAnswer,
+  react: game.react,
+  // ...
+};
+</script>
+<script type="text/plain" id="c-table">
+# aws/template.yaml: a whole table in six lines
+GamesTable:
+  Type: AWS::DynamoDB::Table
+  Properties:
+    BillingMode: PAY_PER_REQUEST          # pay per request, nothing when idle
+    AttributeDefinitions: [{ AttributeName: code, AttributeType: S }]
+    KeySchema: [{ AttributeName: code, KeyType: HASH }]
+    TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
+</script>
+<script type="text/plain" id="c-filter">
+# aws/template.yaml: count error log lines, even ones the code caught
+ApiErrorLogsFilter:
+  Type: AWS::Logs::MetricFilter
+  Properties:
+    LogGroupName: !Ref ApiLogGroup
+    FilterPattern: '{ $.level = "error" }'
+    MetricTransformations:
+      - { MetricNamespace: Quibble, MetricName: ErrorLogLines, MetricValue: '1' }
+</script>
+<script type="text/plain" id="c-monitor">
+// handlers/monitor.js: one function, four kinds of event
+export const handler = async (event = {}) => {
+  if (event['detail-type'] === 'Scheduled Event') return healthCheck();   // every minute
+  if (event.alarmData) return onAlarm(event);                             // an alarm fired
+  if (event.source === 'aws.cloudformation') return onStackEvent(event);  // a deploy failed
+  if (event.action === 'test') return testEmail();                        // npm run alerts:test
+};
+</script>
+<script type="text/plain" id="c-score">
+// lib/scoring.js
+export function calculateScore({ correct, elapsedMs, timeLimitMs }) {
+  if (!correct) return 0;
+  const ratio = Math.min(Math.max(elapsedMs / timeLimitMs, 0), 1);
+  return Math.round(1000 * (1 - ratio / 2));   // 1000 instant, 500 at the buzzer
+}
+
+export function streakBonus(streak) {
+  if (streak < 3) return 0;                      // the 3rd in a row starts paying
+  return Math.min(500, (streak - 3 + 1) * 100);  // +100, +200 ... up to +500
+}
+</script>
+<script type="text/plain" id="c-plain">
+await ddb.send(new PutCommand({
+  TableName, Item: { pk: `${code}#A#${k}`, sk: String(seat), choice, at },
+}));
+await update(gate, { update: 'ADD #answered :one' });
+</script>
+<script type="text/plain" id="c-cond">
+await ddb.send(new PutCommand({
+  TableName, Item: { pk: `${code}#A#${k}`, sk: String(seat), choice, at },
+  ConditionExpression: 'attribute_not_exists(sk)',
+}));
+await update(gate, { update: 'ADD #answered :one, #seats :seatSet',
+                     condition: 'NOT contains(#seats, :seat)' });
+</script>
+
+<script src="/js/how.js"></script>
+</body>
+</html>

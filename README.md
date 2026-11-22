@@ -250,6 +250,7 @@ The one thing that always runs is the uptime monitor. Each month that's about 43
 ```
 public/                     frontend (vanilla JS, no build step), deployed to S3
   index.html                landing page    play.html       game page
+  how-it-works.html         interactive tour of how Quibble is built on AWS (js/how.js, css/how.css)
   js/app.js                 player app      js/admin.js     admin console (pages in js/admin/)
   js/realtime.js            WebSocket client with acks, resends + auto-reconnect
   js/net.js                 HTTP client with retries and backoff

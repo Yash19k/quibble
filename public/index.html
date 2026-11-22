@@ -15,6 +15,7 @@
   <header class="top">
     <a class="brand" href="/index.html">Quib<span>ble</span></a>
     <nav>
+      <a class="nav-link" href="/how-it-works.html">How it works</a>
       <a class="btn ghost small" href="/play.html" data-auth="out">Log in</a>
       <a class="btn small" href="/play.html" data-cta>Play now</a>
     </nav>
@@ -54,7 +55,7 @@
 
   <main class="sections">
     <section class="steps" aria-labelledby="how">
-      <h2 id="how">How it works</h2>
+      <h2 id="how">How to play</h2>
       <ol class="step-list">
         <li class="card">
           <span class="step-n">01</span>
@@ -96,16 +97,34 @@
       </div>
     </section>
 
-    <section class="stack card" aria-labelledby="stack">
-      <div>
-        <p class="eyebrow">Under the hood</p>
-        <h2 id="stack">Fully serverless on AWS</h2>
-        <p class="muted">No servers to keep running. Rooms, answers and scores move through managed AWS services.</p>
+    <section class="hops" aria-labelledby="stack">
+      <div class="section-head">
+        <p class="eyebrow">Under the hood · fully serverless on AWS</p>
+        <h2 id="stack">How it works</h2>
+        <p class="muted">There's no game server. Rooms, answers and scores move through managed AWS services. Pick a moment in a game to see which ones do the work.</p>
       </div>
-      <ul class="stack-list">
-        <li>API Gateway WebSockets</li><li>Lambda</li><li>DynamoDB</li>
-        <li>S3</li><li>CloudWatch</li><li>IAM</li>
-      </ul>
+      <div class="card hop-card">
+        <div class="hop-tabs" role="tablist" aria-label="Moments in a game">
+          <button class="hop-tab" type="button" role="tab" id="hop-tab-0" aria-controls="hop-stage" aria-selected="true"><span class="hop-n">01</span>Open the site</button>
+          <button class="hop-tab" type="button" role="tab" id="hop-tab-1" aria-controls="hop-stage" aria-selected="false" tabindex="-1"><span class="hop-n">02</span>Log in</button>
+          <button class="hop-tab" type="button" role="tab" id="hop-tab-2" aria-controls="hop-stage" aria-selected="false" tabindex="-1"><span class="hop-n">03</span>Join a room</button>
+          <button class="hop-tab" type="button" role="tab" id="hop-tab-3" aria-controls="hop-stage" aria-selected="false" tabindex="-1"><span class="hop-n">04</span>Next question</button>
+          <button class="hop-tab" type="button" role="tab" id="hop-tab-4" aria-controls="hop-stage" aria-selected="false" tabindex="-1"><span class="hop-n">05</span>You answer</button>
+          <button class="hop-tab" type="button" role="tab" id="hop-tab-5" aria-controls="hop-stage" aria-selected="false" tabindex="-1"><span class="hop-n">06</span>Something breaks</button>
+        </div>
+        <div class="hop-stage" id="hop-stage" role="tabpanel" aria-labelledby="hop-tab-0">
+          <ol class="hop-chain" id="hop-chain" aria-label="Where the request goes"></ol>
+          <div class="hop-text" id="hop-text">
+            <h3 id="hop-title">The website is just files</h3>
+            <p id="hop-body">The pages, styles and scripts sit in an S3 bucket, and S3 hands them to your browser. Nothing runs until somebody plays.</p>
+            <p class="hop-src">In the code <code id="hop-code">aws/scripts/publish-frontend.mjs</code></p>
+          </div>
+        </div>
+      </div>
+      <div class="hop-cta">
+        <a class="btn big" href="/how-it-works.html">Take the interactive tour</a>
+        <p class="muted">Follow requests across the whole architecture, break things on purpose, then play an AWS round scored exactly like Quibble.</p>
+      </div>
     </section>
 
     <section class="final">
@@ -116,8 +135,10 @@
 
   <footer class="foot">
     <span>Quib<span class="accent">ble</span> · MIT licensed</span>
-    <a href="https://github.com/Yash19k/quibble" rel="noopener">Source on GitHub</a>
+    <span class="foot-links"><a href="/how-it-works.html">How it's built</a><a href="https://github.com/Yash19k/quibble" rel="noopener">Source on GitHub</a></span>
   </footer>
+
+  <script src="/js/landing-how.js" defer></script>
 
   <script>
     // Logged-in visitors skip straight to their lobby.

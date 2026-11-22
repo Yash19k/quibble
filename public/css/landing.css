@@ -94,14 +94,59 @@
 .feature-grid .stat { margin: 0; font: 500 .95rem/1.45 var(--display); text-transform: none; letter-spacing: 0; color: var(--ink-2); }
 .feature-grid .stat b { margin-bottom: 6px; }
 
-.stack { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: center; padding: 36px; }
-.stack p { margin: 0; }
-.stack-list { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.stack-list li {
-  font: 500 .85rem var(--mono); padding: 12px 14px;
-  background: var(--paper); border: 2px solid var(--line); border-radius: var(--r);
+/* ---------- how it works (js/landing-how.js) ---------- */
+.hop-card { display: grid; grid-template-columns: minmax(200px, 250px) minmax(0, 1fr); padding: 0; margin: 0; overflow: hidden; }
+.hop-tabs { display: flex; flex-direction: column; background: var(--sunk); border-right: 2px solid var(--line); }
+/* Reset the global button look: these are tabs, not buttons. */
+.hop-tab {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 14px 18px; text-align: left; font-weight: 600; font-size: .98rem;
+  background: transparent; color: var(--ink-2);
+  border: 0; border-bottom: 2px solid var(--hair); border-radius: 0; box-shadow: none;
 }
-.stack-list li::before { content: '▸ '; color: var(--accent); }
+.hop-tab:last-child { border-bottom: 0; }
+.hop-tab:hover:not(:disabled), .hop-tab:active:not(:disabled) { transform: none; box-shadow: none; background: var(--card); color: var(--ink); }
+.hop-tab[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: inset 5px 0 0 var(--accent); }
+.hop-tab[aria-selected="true"]:hover { box-shadow: inset 5px 0 0 var(--accent); }
+.hop-tab:focus-visible { outline-offset: -4px; }
+.hop-n { font: 800 .72rem var(--mono); padding: 2px 6px; border: 1.5px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink); }
+.hop-tab[aria-selected="true"] .hop-n { background: var(--accent); color: #171410; }
+
+.hop-stage { padding: 30px 32px; display: grid; gap: 26px; align-content: start; min-height: 330px; min-width: 0; }
+.hop-chain { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.hop-node {
+  display: grid; gap: 2px; padding: 10px 14px;
+  background: var(--paper); color: var(--ink); border: 2px solid var(--line); border-radius: var(--r);
+  transition: background .3s, color .3s, transform .3s, box-shadow .3s;
+}
+.hop-node b { font-size: 1rem; line-height: 1.2; }
+.hop-node span { font: 500 .72rem var(--mono); color: var(--muted); transition: color .3s; }
+.hop-node.lit { background: var(--accent); color: #171410; box-shadow: var(--shadow-sm); transform: translate(-2px, -2px); }
+.hop-node.lit span { color: #171410; }
+.hop-arrow { position: relative; width: 26px; height: 3px; margin-right: 6px; background: var(--hair); transition: background .3s; }
+.hop-arrow::after {
+  content: ''; position: absolute; right: -7px; top: -5px;
+  border: 6.5px solid transparent; border-left: 8px solid var(--hair); border-right: 0;
+  transition: border-color .3s;
+}
+.hop-arrow.lit { background: var(--accent); }
+.hop-arrow.lit::after { border-left-color: var(--accent); }
+.hop-text { display: grid; gap: 10px; }
+.hop-text.in { animation: hop-in .35s ease-out; }
+@keyframes hop-in { from { opacity: 0; transform: translateY(6px); } }
+.hop-text h3 { font-size: 1.6rem; margin: 0; }
+.hop-text p { margin: 0; max-width: 62ch; color: var(--ink-2); font-size: 1.05rem; }
+.hop-text .hop-src { font: 500 .78rem var(--mono); color: var(--muted); }
+.hop-src code { margin-left: 6px; padding: 2px 7px; border-radius: 4px; background: var(--sunk); color: var(--ink); overflow-wrap: anywhere; }
+.hop-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 24px; margin-top: 28px; }
+.hop-cta p { margin: 0; max-width: 52ch; }
+@media (prefers-reduced-motion: reduce) {
+  .hop-node, .hop-node span, .hop-arrow, .hop-arrow::after { transition: none; }
+  .hop-text.in { animation: none; }
+}
+
+.nav-link { font-weight: 600; font-size: .95rem; margin-right: 4px; }
+.foot-links { display: flex; flex-wrap: wrap; gap: 8px 20px; }
 
 .final { text-align: center; padding: 56px 24px; border: 2px dashed var(--hair); border-radius: var(--r); }
 .final h2 { margin-bottom: 22px; }
@@ -119,13 +164,30 @@
   .demo-code { left: 0; }
   .step-list { grid-template-columns: 1fr; }
   .feature-grid { grid-template-columns: 1fr 1fr; }
-  .stack { grid-template-columns: 1fr; padding: 24px; }
+  .hop-card { grid-template-columns: minmax(0, 1fr); }
+  .hop-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-right: 0; border-bottom: 2px solid var(--line); }
+  .hop-tab { border-bottom: 0; border-right: 2px solid var(--hair); padding: 12px 14px; font-size: .92rem; }
+  .hop-tab:nth-child(3n) { border-right: 0; }
+  .hop-tab:nth-child(-n+3) { border-bottom: 2px solid var(--hair); }
+  .hop-tab[aria-selected="true"], .hop-tab[aria-selected="true"]:hover { box-shadow: inset 0 -4px 0 var(--accent); }
+  .hop-stage { padding: 24px 20px; min-height: 0; }
   .sections { padding: 16px 16px 64px; }
   .sections > section { margin-bottom: 64px; }
 }
 @media (max-width: 480px) {
   .top { padding: 12px 16px; }
-  .feature-grid, .stack-list { grid-template-columns: 1fr; }
+  .feature-grid { grid-template-columns: 1fr; }
+  .nav-link { display: none; } /* the How it works section and footer link it to on phones */
+  .hop-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hop-tab, .hop-tab:nth-child(3n) { border-right: 2px solid var(--hair); }
+  .hop-tab:nth-child(2n) { border-right: 0; }
+  .hop-tab:nth-child(-n+4) { border-bottom: 2px solid var(--hair); }
+  .hop-tab:nth-child(n+5) { border-bottom: 0; }
+  /* The hops stack vertically, with the arrows pointing down. */
+  .hop-chain { flex-direction: column; align-items: stretch; gap: 6px; }
+  .hop-arrow { width: 3px; height: 16px; margin: 0 0 6px 22px; }
+  .hop-arrow::after { right: auto; top: auto; left: -5px; bottom: -7px; border: 6.5px solid transparent; border-top: 8px solid var(--hair); border-bottom: 0; }
+  .hop-arrow.lit::after { border-top-color: var(--accent); border-left-color: transparent; }
   .demo-card .opts { grid-template-columns: 1fr 1fr; }
   .cta-row .btn { flex: 1 1 100%; }
 }

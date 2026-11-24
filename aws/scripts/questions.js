@@ -144,14 +144,14 @@ export const QUESTIONS = [
 // Questions of the other types (lib/qtypes.js), in the same categories.
 export const TYPED_QUESTIONS = [
   // True or false (correctIndex 0 = True, 1 = False)
-  { type: 'truefalse', text: 'Lightning never strikes the same place twice.', correctIndex: 1, category: 'Science', timeLimit: 10 },
-  { type: 'truefalse', text: 'Octopuses have three hearts.', correctIndex: 0, category: 'Science', timeLimit: 10 },
-  { type: 'truefalse', text: 'The Great Wall of China is visible from the Moon with the naked eye.', correctIndex: 1, category: 'History', timeLimit: 10 },
-  { type: 'truefalse', text: 'Australia is wider than the Moon.', correctIndex: 0, category: 'World Geography', timeLimit: 10 },
-  { type: 'truefalse', text: 'JavaScript and Java are the same language.', correctIndex: 1, category: 'Technology', timeLimit: 10 },
-  { type: 'truefalse', text: 'An Amazon S3 bucket name must be unique across all AWS accounts.', correctIndex: 0, category: 'AWS Fundamentals', timeLimit: 10 },
-  { type: 'truefalse', text: 'A cricket match can end in a tie.', correctIndex: 0, category: 'Sports', timeLimit: 10 },
-  { type: 'truefalse', text: 'Bananas grow on trees.', correctIndex: 1, category: 'Science', timeLimit: 10 },
+  { type: 'truefalse', text: 'Lightning never strikes the same place twice.', options: ['True', 'False'], correctIndex: 1, category: 'Science', timeLimit: 10 },
+  { type: 'truefalse', text: 'Octopuses have three hearts.', options: ['True', 'False'], correctIndex: 0, category: 'Science', timeLimit: 10 },
+  { type: 'truefalse', text: 'The Great Wall of China is visible from the Moon with the naked eye.', options: ['True', 'False'], correctIndex: 1, category: 'History', timeLimit: 10 },
+  { type: 'truefalse', text: 'Australia is wider than the Moon.', options: ['True', 'False'], correctIndex: 0, category: 'World Geography', timeLimit: 10 },
+  { type: 'truefalse', text: 'JavaScript and Java are the same language.', options: ['True', 'False'], correctIndex: 1, category: 'Technology', timeLimit: 10 },
+  { type: 'truefalse', text: 'An Amazon S3 bucket name must be unique across all AWS accounts.', options: ['True', 'False'], correctIndex: 0, category: 'AWS Fundamentals', timeLimit: 10 },
+  { type: 'truefalse', text: 'A cricket match can end in a tie.', options: ['True', 'False'], correctIndex: 0, category: 'Sports', timeLimit: 10 },
+  { type: 'truefalse', text: 'Bananas grow on trees.', options: ['True', 'False'], correctIndex: 1, category: 'Science', timeLimit: 10 },
   // Type it (several accepted spellings; small typos are forgiven)
   { type: 'type', text: 'What is the chemical symbol for gold?', answers: ['Au'], category: 'Science', timeLimit: 20 },
   { type: 'type', text: 'Which planet is closest to the Sun?', answers: ['Mercury'], category: 'Science', timeLimit: 20 },

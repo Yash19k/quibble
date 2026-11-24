@@ -20,6 +20,13 @@ export const TYPE_LABELS = {
 export const isTapType = (type) => type === 'choice' || type === 'truefalse';
 export const typeOf = (q) => (TYPES.includes(q?.type) ? q.type : 'choice');
 
+const TRUE_FALSE = Object.freeze(['True', 'False']);
+/**
+ * The options of a tap question. True/false is always ['True', 'False'], even for a question stored without them
+ * (the seeded samples were): a missing array once crashed the game timer and froze the game on that question.
+ */
+export const tapOptions = (q) => (typeOf(q) === 'truefalse' ? [...TRUE_FALSE] : Array.isArray(q?.options) ? q.options : []);
+
 /** Points for a close-but-not-right answer (order: share of items in place; number: how close) are at most this. */
 export const PARTIAL_MAX = 500;
 
@@ -28,7 +35,7 @@ export const PARTIAL_MAX = 500;
 export function cleanQuestion(q) {
   const type = typeOf(q);
   const base = { type, text: q.text, category: q.category, timeLimit: q.timeLimit };
-  if (isTapType(type)) return { ...base, options: q.options, correctIndex: q.correctIndex };
+  if (isTapType(type)) return { ...base, options: tapOptions(q), correctIndex: q.correctIndex };
   if (type === 'type') return { ...base, answers: q.answers };
   if (type === 'order') return { ...base, items: q.items };
   return { ...base, answer: q.answer, tolerance: q.tolerance ?? 0, ...(q.unit ? { unit: q.unit } : {}) };
@@ -37,7 +44,7 @@ export function cleanQuestion(q) {
 /** The right answer as one line of text (admin lists, reveals). */
 export function answerText(q) {
   const type = typeOf(q);
-  if (isTapType(type)) return q.options?.[q.correctIndex] ?? '';
+  if (isTapType(type)) return tapOptions(q)[q.correctIndex] ?? '';
   if (type === 'type') return q.answers?.[0] ?? '';
   if (type === 'order') {
     if (q.correctOrder && q.options) return q.correctOrder.map((i) => q.options[i]).join(' → ');
@@ -64,7 +71,7 @@ function shuffled(n, random = Math.random) {
 export function prepareQuestion(q, { double = false, random = Math.random } = {}) {
   const type = typeOf(q);
   const base = { id: q.id, type, text: q.text, category: q.category, timeLimit: q.timeLimit, double: !!double };
-  if (isTapType(type)) return { ...base, options: q.options, correctIndex: q.correctIndex };
+  if (isTapType(type)) return { ...base, options: tapOptions(q), correctIndex: q.correctIndex };
   if (type === 'type') return { ...base, answers: q.answers };
   if (type === 'order') {
     const n = q.items.length;
@@ -83,14 +90,15 @@ export function prepareQuestion(q, { double = false, random = Math.random } = {}
 export function publicQuestion(q) {
   const type = typeOf(q);
   const out = { type, text: q.text, timeLimit: q.timeLimit, double: !!q.double };
-  if (type !== 'type' && type !== 'number') out.options = q.options;
+  if (isTapType(type)) out.options = tapOptions(q);
+  else if (type === 'order') out.options = q.options ?? [];
   else out.options = [];
   if (type === 'number' && q.unit) out.unit = q.unit;
   return out;
 }
 
 /** How many options the question's gate accepts (tap types); other types always submit option 0. */
-export const gateOptionCount = (q) => (isTapType(typeOf(q)) ? q.options.length : 1);
+export const gateOptionCount = (q) => (isTapType(typeOf(q)) ? tapOptions(q).length : 1);
 
 // ---------- answers ----------
 /**
@@ -110,7 +118,7 @@ export function normalizeAnswer(q, data) {
     return { answer: text };
   }
   if (type === 'order') {
-    const n = q.options.length;
+    const n = q.options?.length ?? 0;
     const order = data.order;
     if (!Array.isArray(order) || order.length !== n) throw bad();
     if (new Set(order).size !== n || !order.every((i) => Number.isInteger(i) && i >= 0 && i < n)) throw bad();

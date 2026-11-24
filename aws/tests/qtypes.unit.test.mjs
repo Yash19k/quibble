@@ -163,3 +163,21 @@ test('awards pick the longest streak and the most right answers', () => {
   assert.deepEqual(awardsOf(board), { streak: { username: 'bob', n: 5 }, sharp: { username: 'bob', n: 5 } });
   assert.deepEqual(awardsOf([{ username: 'x', rank: 1, correctCount: 0, bestStreak: 0 }]), { streak: null, sharp: null });
 });
+
+test('true/false questions stored without options still open, show and reveal (the frozen-game bug)', () => {
+  // The seeded samples had no options array: opening one crashed the game timer and froze the game.
+  const stored = { type: 'truefalse', text: 'Octopuses have three hearts.', correctIndex: 0, category: 'Science', timeLimit: 10 };
+  const g = Q.prepareQuestion(stored);
+  assert.deepEqual(g.options, ['True', 'False']);
+  assert.equal(Q.gateOptionCount(stored), 2);
+  assert.equal(Q.gateOptionCount(g), 2);
+  assert.deepEqual(Q.publicQuestion(stored).options, ['True', 'False']);
+  assert.equal(Q.answerText(stored), 'True');
+  assert.deepEqual(Q.cleanQuestion(stored).options, ['True', 'False']);
+  assert.deepEqual(Q.normalizeAnswer(stored, { choice: 1 }), { choice: 1 });
+  // A game that already holds the option-less copy still reveals with both options.
+  const gate = { k: 0, correctIndex: 0, optionCount: 2, startedAt: 0, timeLimitMs: 10_000 };
+  const { result } = scoreQuestion({ k: 0, question: { ...stored, id: 'x' }, gate, answers: [], roster: [], prevScores: {}, playerCount: 0 });
+  assert.deepEqual(result.options, ['True', 'False']);
+  assert.equal(result.answerText, 'True');
+});

@@ -3,7 +3,7 @@
 // GSI byUser (userId) reaches all of a user's tabs (attaching other tabs to a game, closing a banned user's sockets).
 // Game broadcasts never come from this table: their targets are the `conns` sets on the game's member items
 // (lib/gamedata.js), read with a strongly consistent Query.
-import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { plain } from './gamedata.js';
 import { ddb, queryAll, isConditionFailed, nowIso } from './db.js';
 import { env } from './config.js';
@@ -70,6 +70,31 @@ export async function touchConnection(connectionId, now = Date.now()) {
     }
   }
   return getConnection(connectionId);
+}
+
+// ---------- is anyone really still there? ----------
+// Browsers ping every 5 minutes and API Gateway drops a socket after 10 idle minutes, so a socket whose record shows
+// no message (and no connect) for longer than this is dead even if its $disconnect never arrived.
+export const SOCKET_STALE_MS = 11 * 60 * 1000;
+
+/** When a socket record last showed life: its last message window, or when it connected. */
+export const lastActiveAt = (c) => Math.max(Number(c?.rlWin ?? 0) * MSG_WINDOW_MS, Date.parse(c?.connectedAt ?? '') || 0);
+
+/**
+ * True if at least one of these sockets is still open: its record exists and it was active within SOCKET_STALE_MS.
+ * Reads at most 100 records per call; keys DynamoDB leaves unprocessed count as alive (never end a game by mistake).
+ */
+export async function anySocketAlive(connectionIds, now = Date.now()) {
+  const ids = [...new Set(connectionIds)];
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const res = await ddb.send(new BatchGetCommand({
+      RequestItems: { [env.connectionsTable]: { Keys: chunk.map((connectionId) => ({ connectionId })), ProjectionExpression: 'connectionId, rlWin, connectedAt' } },
+    }));
+    if (res.UnprocessedKeys?.[env.connectionsTable]?.Keys?.length) return true;
+    if ((res.Responses?.[env.connectionsTable] ?? []).some((c) => now - lastActiveAt(c) < SOCKET_STALE_MS)) return true;
+  }
+  return false;
 }
 
 /** Deletes the record and returns what it held (null if it was already gone). */

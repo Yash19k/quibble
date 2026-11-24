@@ -9,6 +9,7 @@ import { Realtime } from './realtime.js';
 import { drawQr } from './qr.js';
 import { setPresence } from './presence.js';
 import { questionEditor, TYPE_LABELS, TYPE_ICONS } from './qeditor.js';
+import { scanJoinCode } from './scan.js';
 
 // Game protocol spoken with the server. The server answers hello with {reload: true} when it moved on.
 const PROTOCOL = 3;
@@ -950,11 +951,21 @@ function playTab(body) {
   } }, 'Create game');
 
   const joinBtn = el('button', { type: 'submit' }, 'Join');
+  const scanBtn = el('button', {
+    type: 'button', class: 'ghost with-icon scan-btn', 'aria-label': 'Scan the host’s QR code', title: 'Scan the host’s QR code',
+    onclick: async () => {
+      joinErr.textContent = '';
+      const scanned = await scanJoinCode();
+      if (!scanned) return code.focus();
+      code.value = scanned;
+      joinGame(scanned, joinBtn, joinErr);
+    },
+  }, icon('scan', { size: 20 }), el('span', { class: 'scan-label' }, 'Scan'));
   const joinForm = el('form', { class: 'card join-card', onsubmit: (e) => { e.preventDefault(); joinGame(code.value, joinBtn, joinErr); } },
     el('div', { class: 'join-copy' },
       el('h3', {}, 'Join a game'),
       el('p', { class: 'muted' }, 'Enter the code on the host’s screen, or scan their QR code.')),
-    el('div', { class: 'join-row' }, code, joinBtn),
+    el('div', { class: 'join-row' }, code, joinBtn, scanBtn),
     joinErr);
 
   if (linkedQuiz && hostPrefs.quizId === linkedQuiz.id) {
@@ -1536,7 +1547,7 @@ function renderLobby() {
       ui.more,
       ui.empty,
       reactionBar(),
-      el('div', { class: 'row', style: 'margin-top:16px' },
+      el('div', { class: 'row lobby-actions', style: 'margin-top:16px' },
         host ? startBtn : el('span', { class: 'muted grow' }, 'Waiting for the host to start…'),
         leaveButton())));
   }

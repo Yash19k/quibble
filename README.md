@@ -16,7 +16,7 @@ One person hosts a game and gets a 6-character code, up to 250 players join from
 - **Five question types:** multiple choice, true/false, *type it* (forgives capitals, accents and small typos), *put in order* (partly right still scores) and *closest number* (close guesses earn points; the reveal names the closest guess)
 - **Streaks and double points:** 3+ right answers in a row earn a growing bonus (+100 up to +500); hosts can switch on double-points rounds (always the final question)
 - **Richer results:** answer breakdown, how many got it right, the fastest right answer, the biggest climber, rank arrows and popular typed answers; a podium and awards at the end
-- **Join by QR code:** the lobby draws a QR code of the join link (generated in the browser, no CDN)
+- **Join by QR code:** the lobby draws a QR code of the join link (generated in the browser, no CDN), and the Join card has a **Scan** button that reads it with the phone's camera (the browser's `BarcodeDetector`, or the bundled jsQR decoder on iPhone), with a photo upload when there is no camera. A scan only ever takes the 6-character code; it never opens the scanned link
 - **Emoji reactions** in the lobby, on results and the final screen, batched on the server so a full room costs about one push a second
 - **Big-screen mode (optional):** the host's screen becomes a projector view (huge question, timer, animated leaderboard) and phones become answer pads
 - **My quizzes:** anyone can build their own quiz with any question type, host it, or share a link so others can host it (they never see the answers)
@@ -75,6 +75,7 @@ Lambdas are stateless and short-lived, so a game can't live in memory and can't 
 - **Time:** whoever moves a game into a new phase invokes the `game-timer` Lambda asynchronously with that phase's deadline. While a question is open the timer pushes "x of y answered" about once a second; at the deadline it scores the question; after the reveal it opens the next one. If everyone answers early, the question closes at once.
 - **Push:** Lambdas send events to players' browsers through the API Gateway Management API (`PostToConnection`), addressed to the sockets listed on each member item. Every event carries the game's `version`, so browsers ignore stale or repeated ones.
 - **Self-healing:** pushes and `$disconnect` events can get lost. A browser that waits too long for the next phase sends `sync` and gets a full snapshot of the game; if a timer died, that `sync` also restarts it (under a short lease, so 250 browsers don't all try).
+- **Abandoned games end on their own.** An EventBridge schedule sends the `game-timer` Lambda `{"kind":"sweep"}` every 2 minutes. It cancels a game in play that everyone (host included) left 3 minutes ago, a lobby that has been empty for 10 minutes, a lobby past its 3-hour limit, a phase stuck more than 2 minutes past its deadline that un-sticking can't move, and anything live for over 4 hours; it tries to un-stick overdue games first. "Left" means no socket that showed life in the last 11 minutes (browsers ping every 5), so a lost `$disconnect` can't keep a dead game open. Locally the dev server runs the same sweep (`LOCAL_SWEEP_MS`).
 
 ## Run it locally (no AWS account needed)
 

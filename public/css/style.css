@@ -692,6 +692,127 @@ body.stage .p1 .podium-block { height: 200px; }
 body.stage .p2 .podium-block { height: 150px; }
 body.stage .p3 .podium-block { height: 110px; }
 
+/* ---------- QR scanner (Join card) ---------- */
+.join-row .scan-btn { padding: 0 14px; }
+dialog.scan-modal { width: min(460px, calc(100vw - 24px)); }
+.scan-frame {
+  position: relative; margin: 14px 0 0; aspect-ratio: 1; overflow: hidden;
+  background: #171410; border: 2px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow-sm);
+}
+.scan-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+/* The aiming square: four corners, so the picture itself stays visible. */
+.scan-target {
+  position: absolute; inset: 16%; pointer-events: none; border-radius: 4px;
+  --c: rgba(255, 255, 255, .92); --len: 28px; --w: 4px;
+  background:
+    linear-gradient(var(--c), var(--c)) top left / var(--len) var(--w) no-repeat,
+    linear-gradient(var(--c), var(--c)) top left / var(--w) var(--len) no-repeat,
+    linear-gradient(var(--c), var(--c)) top right / var(--len) var(--w) no-repeat,
+    linear-gradient(var(--c), var(--c)) top right / var(--w) var(--len) no-repeat,
+    linear-gradient(var(--c), var(--c)) bottom left / var(--len) var(--w) no-repeat,
+    linear-gradient(var(--c), var(--c)) bottom left / var(--w) var(--len) no-repeat,
+    linear-gradient(var(--c), var(--c)) bottom right / var(--len) var(--w) no-repeat,
+    linear-gradient(var(--c), var(--c)) bottom right / var(--w) var(--len) no-repeat;
+  transition: inset .2s ease-out;
+}
+.scan-frame.found .scan-target { --c: var(--good); inset: 12%; }
+.scan-frame.off { aspect-ratio: 16 / 7; background: var(--sunk); }
+.scan-frame.off .scan-target, .scan-frame.off video { display: none; }
+.scan-off { display: none; }
+.scan-frame.off .scan-off { display: grid; place-items: center; position: absolute; inset: 0; color: var(--muted); }
+.scan-status { margin: 12px 0 0; min-height: 1.5em; font: 500 .82rem var(--mono); color: var(--ink-2); }
+.scan-status.bad { color: var(--bad); }
+.scan-status.good { color: var(--good); font-weight: 800; }
+dialog.scan-modal .modal-actions { justify-content: space-between; margin-top: 16px; }
+
+/* ---------- touch ---------- */
+/* No double-tap zoom delay on buttons (answers are timed) and no grey tap flash over the themed press effect. */
+button, .btn, .opt, .react-btn { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+#toast { max-width: calc(100vw - 32px); text-align: center; }
+.qhead > * { white-space: nowrap; }
+
+/* ---------- phones ---------- */
+@media (max-width: 560px) {
+  /* One compact header row: logo, theme, name, log out. */
+  .top { flex-wrap: nowrap; gap: 8px; padding: 10px 14px; }
+  .brand { font-size: 1.25rem; flex: 0 0 auto; }
+  .brand::before { width: 26px; height: 26px; margin-right: 8px; font-size: .95rem; }
+  .brand small { margin-left: 6px; font-size: .6rem; padding: 1px 4px; }
+  .theme-toggle { width: 34px; height: 34px; }
+  nav { flex-wrap: nowrap; gap: 8px; min-width: 0; }
+  nav .who { min-width: 0; max-width: 26vw; font-size: .78rem; gap: 6px; }
+  nav .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+  nav .who::before { display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  nav .btn.small, nav button.small { padding: 5px 9px; white-space: nowrap; }
+  /* The admin console's header carries more (badge, Back to game): let its nav take a second row. */
+  body.admin .top { flex-wrap: wrap; }
+  body.admin nav { flex-wrap: wrap; }
+  body.admin nav .who { max-width: 40vw; }
+
+  main { padding: 16px 12px 64px; }
+  .card { padding: 18px 16px; margin-bottom: 16px; }
+  .narrow { margin: 20px auto; }
+  .narrow h2 { font-size: 1.9rem; }
+  h2 { font-size: 1.7rem; }
+
+  /* Home tabs: one swipeable row instead of a wrapped grid. */
+  .tabs:not(.seg) {
+    display: flex; flex-wrap: nowrap; width: 100%; margin-bottom: 16px;
+    overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain;
+  }
+  .tabs:not(.seg)::-webkit-scrollbar { display: none; }
+  .tabs:not(.seg) button { flex: 1 0 auto; padding: 9px 10px; font-size: .9rem; white-space: nowrap; }
+
+  /* Join card: the code box takes the room, Join and Scan stay finger-sized. */
+  .join-row { gap: 8px; }
+  .join-row button { padding: 0 16px; min-height: 50px; }
+  .join-row .scan-btn { padding: 0 12px; }
+  .code-input { letter-spacing: .14em; font-size: 1.2rem; }
+
+  /* Lobby */
+  .code { gap: 6px; }
+  .join-link input { font-size: 16px; } /* 16px+ stops iOS zooming in on focus */
+  .lobby-actions { flex-wrap: nowrap; }
+  .lobby-actions > button:first-child { flex: 1 1 auto; padding: 13px 18px; font-size: 1.05rem; }
+  .lobby-actions > .muted { display: none; } /* the green "You're in" banner already says it */
+  .lobby-actions > button:only-of-type { margin-left: auto; }
+  .players { max-height: 40vh; }
+
+  /* Question: everything above the fold, even on a small phone. */
+  .qhead { font-size: .72rem; letter-spacing: .05em; gap: 8px; }
+  .qtext { margin: 10px 0 16px; }
+  .opts { gap: 10px; }
+  .opt { min-height: 62px; padding: 12px 14px; font-size: 1.05rem; gap: 12px; }
+  .opt::before { width: 30px; height: 30px; }
+  .opt.tf { min-height: 96px; }
+  .answer-form { flex-wrap: wrap; }
+  .answer-input { font-size: 1.15rem; }
+  .answer-form button { flex: 1 1 100%; }
+
+  /* Reactions: all eight on one row. */
+  .react-bar { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
+  .react-btn { width: 100%; max-width: 44px; height: auto; aspect-ratio: 1; justify-self: center; }
+  .react-btn svg { width: 20px; height: 20px; }
+
+  /* Scoreboards and tables */
+  th, td { padding: 9px 6px; font-size: .9rem; }
+  td.medal { width: 2.6rem; }
+  .stat-chip { font-size: .85rem; padding: 4px 10px; }
+  .podium { gap: 6px; }
+  .podium-name { font-size: .92rem; }
+
+  /* Host form */
+  .host-side { position: static; padding: 14px; }
+  .setting-text small { font-size: .7rem; }
+
+  dialog.modal { padding: 20px 18px; }
+  .modal-actions > button { flex: 1 1 auto; }
+}
+@media (max-width: 360px) {
+  nav .who { display: none; }
+  .join-row .scan-label { display: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }

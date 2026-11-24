@@ -33,3 +33,16 @@ test('the same text always gives the same code', () => {
 test('text that cannot fit is refused', () => {
   assert.throws(() => qrMatrix('x'.repeat(3000)), /Too long/);
 });
+
+test('a scanned QR code yields a game code, never a link to follow', async () => {
+  const { codeFromScan } = await import('../../public/js/common.js');
+  assert.equal(codeFromScan('https://quibble.example/play.html?code=abc234'), 'ABC234');
+  assert.equal(codeFromScan('http://localhost:5050/play.html?code=XK7P2Q'), 'XK7P2Q');
+  assert.equal(codeFromScan('  xk7p2q \n'), 'XK7P2Q'); // a bare code
+  assert.equal(codeFromScan('https://evil.example/login'), null);
+  assert.equal(codeFromScan('javascript:alert(1)//?code=ABC234'), null);
+  assert.equal(codeFromScan('https://quibble.example/play.html?code=ABC23'), null); // too short
+  assert.equal(codeFromScan('WIFI:S:home;T:WPA;P:secret;;'), null);
+  assert.equal(codeFromScan(''), null);
+  assert.equal(codeFromScan(null), null);
+});

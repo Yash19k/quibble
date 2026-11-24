@@ -200,7 +200,7 @@ export function scoreQuestion({ k, question, gate, answers, roster, prevScores =
       correctOrder: question.correctOrder ?? null,
       answerText: Q.answerText(question),
       text: question.text,
-      options: question.options ?? [],
+      options: tap ? Q.tapOptions(question) : question.options ?? [],
       unit: question.unit || '',
       optionCounts,
       answeredCount: answers.length,

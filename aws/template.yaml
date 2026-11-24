@@ -462,6 +462,14 @@ Resources:
       EventInvokeConfig:
         MaximumRetryAttempts: 2 # every step is idempotent, so a retry is safe
         MaximumEventAgeInSeconds: 600 # throttled events wait in Lambda's queue (with backoff) this long
+      Events:
+        # Closes games everyone walked away from (and expired or frozen ones), so nothing stays "live" overnight.
+        Sweep:
+          Type: Schedule
+          Properties:
+            Schedule: rate(2 minutes)
+            Input: '{"kind":"sweep"}'
+            Description: Quibble sweep of abandoned, expired and frozen games
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref UsersTable }
         - DynamoDBReadPolicy: { TableName: !Ref QuestionsTable }

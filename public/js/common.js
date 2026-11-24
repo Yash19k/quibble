@@ -253,6 +253,19 @@ export function parseJoinCode(search) {
   return /^[A-Z0-9]{6}$/.test(code) ? code : null;
 }
 
+/**
+ * The game code in a scanned QR code: a join link (…/play.html?code=ABC123) or a bare 6-character code. Null for
+ * anything else. A scan never navigates anywhere: only the code is taken, so a hostile QR code can't open a page.
+ */
+export function codeFromScan(text) {
+  const raw = String(text ?? '').trim();
+  if (/^[A-Za-z0-9]{6}$/.test(raw)) return raw.toUpperCase();
+  let url;
+  try { url = new URL(raw); } catch { return null; }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  return parseJoinCode(url.search);
+}
+
 /** The shareable link for a game, next to the current page (works under any path or bucket host). */
 export function joinUrl(code, pageHref) {
   const url = new URL('play.html', pageHref);

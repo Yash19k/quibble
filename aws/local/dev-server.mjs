@@ -10,6 +10,7 @@
 //                                 concurrency quota). Extra invocations fail exactly the way API Gateway / Lambda fail.
 //   LOCAL_DROP_DISCONNECT_PCT=15  silently skip this % of $disconnect events (API Gateway's are best-effort)
 //   LOCAL_TRACK_CAPACITY=1        record DynamoDB capacity per partition key -> GET /__local/capacity[?reset=1]
+//   LOCAL_SWEEP_MS=120000         how often the abandoned-game sweep runs (the EventBridge schedule on AWS); 0 = never
 // GET /__local/stats[?reset=1] reports invocations, throttles, dropped disconnects and timer re-queues.
 // Always on: API Gateway's 128 KB WebSocket message limit (both directions); events carry requestTimeEpoch/timeEpoch.
 //
@@ -33,6 +34,7 @@ const PREFIX = process.env.LOCAL_TABLE_PREFIX || 'quibble-local-';
 const CONCURRENCY = Math.max(0, Math.floor(Number(process.env.LOCAL_LAMBDA_CONCURRENCY) || 0)); // 0 = unlimited
 const DROP_DISCONNECT_PCT = Math.min(100, Math.max(0, Number(process.env.LOCAL_DROP_DISCONNECT_PCT) || 0));
 const TRACK_CAPACITY = /^(1|true|yes|on)$/i.test(process.env.LOCAL_TRACK_CAPACITY || '');
+const SWEEP_MS = Math.max(0, Number(process.env.LOCAL_SWEEP_MS ?? 120_000) || 0);
 
 // Environment the handlers read (lib/config.js). Values from the shell or .env win over these local defaults.
 const orDefault = (name, value) => process.env[name] || value;
@@ -519,4 +521,6 @@ server.listen(PORT, () => {
   if (DROP_DISCONNECT_PCT) console.log(`  dropping ${DROP_DISCONNECT_PCT}% of $disconnect events`);
   if (TRACK_CAPACITY) console.log(`  DynamoDB capacity tracking on: GET /__local/capacity[?reset=1]`);
   console.log(`  emulator counters: GET /__local/stats[?reset=1]`);
+  // Like the template's EventBridge schedule: the GameTimer Lambda gets {kind:'sweep'} every 2 minutes.
+  if (SWEEP_MS) setInterval(() => invokeAsync({ kind: 'sweep' }), SWEEP_MS).unref();
 });

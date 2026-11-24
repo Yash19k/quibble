@@ -19,7 +19,7 @@ import * as Q from './qtypes.js';
 import { maskImages } from './images.js';
 import { getUserById, setCurrentGame, clearCurrentGame, userKey, publicUser, lockJoin, unlockJoin } from './users.js';
 import { signToken } from './auth.js';
-import { connectionsForUser, setConnectionGame, clearConnectionGame, deleteConnectionRecord } from './connections.js';
+import { connectionsForUser, setConnectionGame, clearConnectionGame, deleteConnectionRecord, anySocketAlive } from './connections.js';
 import { emitToMembers, disconnectUser } from './push.js';
 import { scheduleAdvance } from './timer.js';
 import { saveResults, refreshBoards } from './results.js';
@@ -43,6 +43,11 @@ const EARLY_SKEW_MS = 2000; // an answer can't have reached AWS more than this l
 // runs within this window (e.g. a player whose socket dropped right after tapping). Then the gate is sealed.
 const SETTLE_MS = 500;
 const MEMBERS_CACHE_MS = 5000;
+// The sweep (every 2 minutes) ends games nobody is in any more, so nothing stays "live" overnight:
+const IDLE_LOBBY_MS = 10 * 60 * 1000; // a lobby nobody has had open for this long (the host and every player left)
+const IDLE_PLAYING_MS = 3 * 60 * 1000; // a game in play that every player and the host left this long ago
+const FROZEN_MS = 2 * 60 * 1000; // a phase this far past its deadline that un-sticking couldn't move on
+const MAX_GAME_MS = 4 * 60 * 60 * 1000; // nothing stays live longer than this, whatever the reason
 
 const T = () => env.gamePlayTable;
 const playTtl = () => gd.ttlAfterDays(PLAY_TTL_DAYS);
@@ -144,13 +149,16 @@ async function addConn(code, userId, connectionId) {
   }
 }
 
-/** Remove a socket from a member's `conns`. Returns { member, wentOffline } or null if it wasn't there. */
+/**
+ * Remove a socket from a member's `conns` and stamp `seenAt` (the member was here until now; the sweep uses it to
+ * tell how long a room has been empty). Returns { member, wentOffline } or null if it wasn't there.
+ */
 async function removeConn(code, userId, connectionId) {
   try {
     const res = await update(T(), gd.keys.member(code, userId), {
-      update: 'DELETE #conns :c',
+      update: 'DELETE #conns :c SET #seenAt = :now',
       condition: 'attribute_exists(#sk) AND contains(#conns, :cid)',
-      values: { ':c': new Set([connectionId]), ':cid': connectionId },
+      values: { ':c': new Set([connectionId]), ':cid': connectionId, ':now': Date.now() },
     }, { ReturnValues: 'ALL_NEW' });
     const member = res.Attributes;
     return { member, wentOffline: !member?.conns || member.conns.size === 0 };
@@ -1066,6 +1074,7 @@ export async function runTimer(event) {
   if (kind === 'lobby') return lobbyTimer(event);
   if (kind === 'unstick') return unstick(event.code);
   if (kind === 'reactions') return reactionTimer(event);
+  if (kind === 'sweep') return sweepGames();
   log('warn', 'unknown timer event', { event });
 }
 
@@ -1161,6 +1170,73 @@ async function unstick(code) {
   } else if (reason === 'end') {
     await endGame(code);
   }
+}
+
+// ---------- the sweep: abandoned, expired and frozen games ----------
+// Every live game normally moves itself along (timers) and gets cleaned up by whoever is in it. Nothing did that for a
+// game everyone walked away from: a lobby stayed "live" until someone came back, and a game whose timer chain broke
+// stayed mid-question forever. A scheduled GameTimer event ({kind:'sweep'}, every 2 minutes) closes those.
+
+/** Why this live game should be closed now (the reason players are shown), or null. Pure. */
+export function abandonReason(h, { anyoneHere, lastSeenAt, stuck, overdueBy }, now = Date.now()) {
+  if (h.status === 'lobby' && now > h.lobbyExpiresAt) return 'The lobby expired.';
+  if (now - (Date.parse(h.createdAt) || now) > MAX_GAME_MS) return 'The game ran too long and was closed.';
+  if (!anyoneHere) {
+    const idleFor = now - lastSeenAt;
+    if (h.status === 'lobby' && idleFor >= IDLE_LOBBY_MS) return 'Everyone left the lobby, so it was closed.';
+    if (h.status !== 'lobby' && idleFor >= IDLE_PLAYING_MS) return 'Everyone left, so the game was closed.';
+  }
+  if (stuck && overdueBy > FROZEN_MS) return 'The game stopped responding and was closed.';
+  return null;
+}
+
+/** How long past its deadline the current phase is (0 if it isn't). */
+function overdueBy(h, lobby, now) {
+  const due = h.status === 'question' ? (h.acceptUntil ?? h.endsAt)
+    : h.status === 'reveal' ? h.revealEndsAt
+      : h.status === 'lobby' && lobby?.closedAt ? lobby.closedAt : now;
+  return Math.max(0, now - (Number(due) || now));
+}
+
+/** Check one live game; cancel it if it was abandoned, or try to un-stick it. True if it was cancelled. */
+async function sweepGame(code, now = Date.now()) {
+  const h = await gd.getHeader(code);
+  if (!V.isLiveStatus(h?.status)) return false;
+  const [members, lobby] = await Promise.all([gd.queryMembers(code), h.status === 'lobby' ? gd.getLobby(code) : null]);
+  const conns = members.flatMap(V.connIds);
+  const anyoneHere = conns.length > 0 && (await anySocketAlive(conns, now));
+  // When the last person was here: their last socket closing, or (no socket ever closed) when they joined.
+  const lastSeenAt = Math.max(Date.parse(h.createdAt) || 0, ...members.map((m) => Number(m.seenAt ?? m.joinedAt ?? 0)));
+  const stuck = V.stuckReason(h, lobby, now);
+  const reason = abandonReason(h, { anyoneHere, lastSeenAt, stuck, overdueBy: overdueBy(h, lobby, now) }, now);
+  if (reason) {
+    const done = await cancel(code, reason);
+    if (done) log('info', 'closed an abandoned game', { code, status: h.status, qIndex: h.qIndex, reason });
+    return done;
+  }
+  if (stuck) {
+    log('warn', 'sweep un-sticking a game', { code, status: h.status, qIndex: h.qIndex, stuck });
+    await unstick(code); // a failure here is retried by the next sweep, and cancelled once FROZEN_MS has passed
+  }
+  return false;
+}
+
+/** The scheduled sweep over every live game. Never throws for one bad game. */
+export async function sweepGames(now = Date.now()) {
+  const live = await scanAll({
+    TableName: env.gamesTable,
+    ...gd.expr({ filter: '#status IN (:l, :q, :r)', projection: '#code', values: { ':l': 'lobby', ':q': 'question', ':r': 'reveal' } }),
+  });
+  let closed = 0;
+  for (const { code } of live) {
+    try {
+      if (await sweepGame(code, now)) closed++;
+    } catch (error) {
+      log('error', 'sweeping a game failed', { error, code });
+    }
+  }
+  if (closed) metric('GamesAbandoned', closed);
+  return { live: live.length, closed };
 }
 
 // ---------- admin ----------
